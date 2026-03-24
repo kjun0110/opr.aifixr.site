@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Building2, Mail, Lock } from 'lucide-react';
+import { loginOprAndStoreSession, OprLoginFailedError } from '@/lib/api/auth';
 
 export default function Login() {
   const router = useRouter();
@@ -10,10 +11,13 @@ export default function Login() {
   const [password, setPassword] = useState('');
   const [emailError, setEmailError] = useState(false);
   const [passwordError, setPasswordError] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    
+    setLoginError(null);
+
     if (!email) {
       setEmailError(true);
       return;
@@ -22,14 +26,27 @@ export default function Login() {
       setPasswordError(true);
       return;
     }
-    
-    // 로그인 성공 시 대시보드로 이동
-    router.push('/dashboard');
+
+    setSubmitting(true);
+    try {
+      await loginOprAndStoreSession(email, password);
+      router.push('/dashboard');
+    } catch (err) {
+      if (err instanceof OprLoginFailedError) {
+        setLoginError(err.message);
+      } else {
+        setLoginError(
+          err instanceof Error ? err.message : '로그인 중 오류가 발생했습니다.',
+        );
+      }
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const handleSSOLogin = () => {
-    // SSO 로그인 처리
-    router.push('/dashboard');
+    setLoginError(null);
+    setLoginError('회사 계정(SSO) 로그인은 아직 연결되지 않았습니다.');
   };
 
   return (
@@ -67,6 +84,12 @@ export default function Login() {
           <p className="text-gray-600 text-sm mb-8">구매직무 관리자 계정으로 로그인하세요</p>
 
           <form onSubmit={handleLogin} className="space-y-5">
+            {loginError && (
+              <p className="text-red-600 text-sm bg-red-50 border border-red-100 rounded-xl px-4 py-3">
+                {loginError}
+              </p>
+            )}
+
             <div>
               <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-2">
                 이메일
@@ -85,6 +108,8 @@ export default function Login() {
                   className={`w-full pl-12 pr-4 py-3 border ${
                     emailError ? 'border-red-500' : 'border-gray-300'
                   } rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500`}
+                  autoComplete="email"
+                  disabled={submitting}
                 />
               </div>
               {emailError && (
@@ -110,6 +135,8 @@ export default function Login() {
                   className={`w-full pl-12 pr-4 py-3 border ${
                     passwordError ? 'border-red-500' : 'border-gray-300'
                   } rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500`}
+                  autoComplete="current-password"
+                  disabled={submitting}
                 />
               </div>
               {passwordError && (
@@ -119,20 +146,21 @@ export default function Login() {
 
             <button
               type="submit"
-              disabled={!email || !password}
+              disabled={!email || !password || submitting}
               className="w-full py-3 text-white font-medium rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed"
               style={{
-                background: email && password ? 'linear-gradient(90deg, #5B3BFA, #00B4FF)' : '#e5e7eb',
+                background: email && password && !submitting ? 'linear-gradient(90deg, #5B3BFA, #00B4FF)' : '#e5e7eb',
                 borderRadius: '14px',
               }}
             >
-              로그인
+              {submitting ? '로그인 중…' : '로그인'}
             </button>
 
             <button
               type="button"
               onClick={handleSSOLogin}
-              className="w-full py-3 text-gray-700 font-medium border-2 border-gray-300 rounded-xl hover:bg-gray-50 transition-all"
+              disabled={submitting}
+              className="w-full py-3 text-gray-700 font-medium border-2 border-gray-300 rounded-xl hover:bg-gray-50 transition-all disabled:opacity-50"
               style={{ borderRadius: '14px' }}
             >
               회사 계정으로 로그인 (SSO)
