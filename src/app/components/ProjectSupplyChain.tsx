@@ -1,10 +1,12 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { ChevronDown, ChevronRight, Plus, Search, Check, Minus, X } from 'lucide-react';
 import { toast } from 'sonner';
 import SupplyChainDiagram from './SupplyChainDiagram';
 import { useMode } from '../context/ModeContext';
+import { apiFetch } from '@/lib/api/client';
+import { SUPPLY_CHAIN_BASE } from '@/lib/api/supply-chain';
 
 // Supply chain node structure
 interface SupplyChainNode {
@@ -46,6 +48,31 @@ interface Project {
   projectName: string;
   productGroups: ProductGroup[];
 }
+
+type ApiCustomer = { id: number; name: string; code?: string | null };
+type ApiBranch = { id: number; customer_id: number; name: string; code?: string | null };
+type ApiProject = { id: number; cust_branch_id: number; name: string; code: string; start_date: string; end_date: string };
+type ApiProduct = { id: number; project_id: number; name: string; code: string };
+type ApiProductVariant = { id: number; product_id: number; name: string; code?: string | null };
+type ApiBom = { id: number; product_variant_id: number; code?: string | null };
+/** 제품별 SRM 1차 협력사 후보 (모달) */
+type ApiSupplierBrief = { id: number; product_id: number; name: string; code?: string | null };
+
+/** 필터 캐스케이드용 (순서 무관 선택, 상위 선택 시 하위 후보만 축소) */
+type ScopeBranchRow = {
+  branchId: number;
+  branchName: string;
+  customerId: number;
+  customerName: string;
+};
+type ScopeProductRow = {
+  code: string;
+  name: string;
+  branchId: number;
+  branchName: string;
+  customerId: number;
+  customerName: string;
+};
 
 // Mock data (고객사/지사별 제품명·세부제품명 고유화)
 const mockProjects: Project[] = [
@@ -266,24 +293,24 @@ const mockSupplyChain: SupplyChainNode = {
   ],
 };
 
-// Mock supplier list for adding tier 1 suppliers
-const mockSupplierList = [
-  { id: 'sup-1', name: '한국배터리', nameEn: 'Korea Battery' },
-  { id: 'sup-2', name: '글로벌소재', nameEn: 'Global Materials' },
-  { id: 'sup-3', name: '아시아화학', nameEn: 'Asia Chemical' },
-  { id: 'sup-4', name: '유럽전지', nameEn: 'Euro Battery' },
-  { id: 'sup-5', name: '일본셀', nameEn: 'Japan Cell' },
-];
-
 const LS_REGISTERED_TIER1_SUPPLIERS_KEY = 'aifix_mock_registered_tier1_suppliers_v1';
 
 export default function ProjectSupplyChain() {
   const { mode } = useMode();
-  const isProcurementView = mode === 'procurement'; // 1차 협력사 추가는 구매 직무에서만 가능
+  const isProcurementView = mode === 'procurement'; // 1차 협력사 추가는 구매 관점에서만 가능
+  const [apiProjects, setApiProjects] = useState<Project[]>([]);
+  /** /customers 응답만으로 채움 — 전체 트리 로딩 전에도 고객사 토글에 목록 표시 */
+  const [apiCustomers, setApiCustomers] = useState<ApiCustomer[]>([]);
+  /** API 메타(지사·제품 코드) — 전체 트리 로딩과 병행, projectRows와 머지 */
+  const [scopeBranchesRaw, setScopeBranchesRaw] = useState<ScopeBranchRow[]>([]);
+  const [scopeProductsRaw, setScopeProductsRaw] = useState<ScopeProductRow[]>([]);
+  const [isApiLoaded, setIsApiLoaded] = useState(false);
+  const [apiLoadError, setApiLoadError] = useState<string | null>(null);
 
-  // Filter states
+  // Filter states (고객·지사·제품 순서 무관 — 값이 있으면 해당 차원으로 후보만 좁힘)
   const [selectedCustomer, setSelectedCustomer] = useState('');
-  const [selectedBranch, setSelectedBranch] = useState('ALL');
+  /** ALL = 지사 필터 없음, 그 외 = opr_cust_branches.id 문자열 */
+  const [selectedBranchKey, setSelectedBranchKey] = useState<string>('ALL');
   // '' = 선택, 'ALL' = 전체(모든 제품) - 기본값 ALL
   const [selectedProductFilterCode, setSelectedProductFilterCode] = useState<string>('ALL');
   
@@ -305,21 +332,281 @@ export default function ProjectSupplyChain() {
   const [modalDetailProduct, setModalDetailProduct] = useState('');
   const [modalSupplier, setModalSupplier] = useState('');
   const [supplierSearchTerm, setSupplierSearchTerm] = useState('');
+  const [modalSuppliers, setModalSuppliers] = useState<ApiSupplierBrief[]>([]);
+  const [modalSuppliersLoading, setModalSuppliersLoading] = useState(false);
+  const [modalSuppliersError, setModalSuppliersError] = useState<string | null>(null);
 
-  // Get unique customers (ALL 제외, 오름차순)
-  const customers = Array.from(new Set(mockProjects.map(p => p.customerName))).sort((a, b) => a.localeCompare(b));
+  // DB/API 데이터만 사용 (mock fallback 비활성화)
+  const projectRows = apiProjects;
+
+  // 고객사 목록: API customers 우선 (트리 로딩 중에도 표시). 로드 후엔 이름 기준 동일.
+  const customers = useMemo(
+    () =>
+      Array.from(new Set(apiCustomers.map((c) => c.name).filter(Boolean))).sort((a, b) =>
+        a.localeCompare(b)
+      ),
+    [apiCustomers]
+  );
   
-  // Get branches for selected customer (unique)
-  const branches = !selectedCustomer
-    ? ['ALL']
-    : ['ALL', ...Array.from(new Set(mockProjects.filter(p => p.customerName === selectedCustomer).map(p => p.branchName))).sort((a, b) => a.localeCompare(b))];
+  const scopeBranches = useMemo(() => {
+    const byId = new Map<number, ScopeBranchRow>();
+    scopeBranchesRaw.forEach((b) => byId.set(b.branchId, b));
+    projectRows.forEach((p) => {
+      const bid = Number(p.branchId);
+      if (!Number.isFinite(bid)) return;
+      if (!byId.has(bid)) {
+        byId.set(bid, {
+          branchId: bid,
+          branchName: p.branchName,
+          customerId: Number(p.customerId),
+          customerName: p.customerName,
+        });
+      }
+    });
+    return Array.from(byId.values()).sort((a, b) => {
+      const c = String(a.customerName ?? '').localeCompare(String(b.customerName ?? ''));
+      return c !== 0 ? c : String(a.branchName ?? '').localeCompare(String(b.branchName ?? ''));
+    });
+  }, [scopeBranchesRaw, projectRows]);
 
-  // Scope projects: 고객사 필수, 세부지사 ALL이면 해당 고객사 전체 지사의 프로젝트 포함
-  const scopedProjects = !selectedCustomer
-    ? []
-    : selectedBranch === 'ALL'
-      ? mockProjects.filter(p => p.customerName === selectedCustomer)
-      : mockProjects.filter(p => p.customerName === selectedCustomer && p.branchName === selectedBranch);
+  const scopeProducts = useMemo(() => {
+    const map = new Map<string, ScopeProductRow>();
+    const k = (r: ScopeProductRow) => `${r.branchId}::${r.code}`;
+    scopeProductsRaw.forEach((r) => map.set(k(r), r));
+    projectRows.forEach((p) => {
+      const bid = Number(p.branchId);
+      if (!Number.isFinite(bid)) return;
+      p.productGroups.forEach((pg) => {
+        const key = `${bid}::${pg.productCode}`;
+        if (!map.has(key)) {
+          map.set(key, {
+            code: pg.productCode,
+            name: pg.name,
+            branchId: bid,
+            branchName: p.branchName,
+            customerId: Number(p.customerId),
+            customerName: p.customerName,
+          });
+        }
+      });
+    });
+    return Array.from(map.values());
+  }, [scopeProductsRaw, projectRows]);
+
+  /** 고객 미선택 시 전체 지사, 고객 선택 시 해당 고객 지사만 */
+  const branchSelectOptions = useMemo(() => {
+    const rows = selectedCustomer
+      ? scopeBranches.filter((b) => b.customerName === selectedCustomer)
+      : scopeBranches;
+    return rows.map((b) => ({
+      value: String(b.branchId),
+      label: selectedCustomer ? b.branchName : `${b.customerName} · ${b.branchName}`,
+    }));
+  }, [scopeBranches, selectedCustomer]);
+
+  const selectedBranchRow = useMemo(
+    () =>
+      selectedBranchKey === 'ALL'
+        ? undefined
+        : scopeBranches.find((b) => String(b.branchId) === selectedBranchKey),
+    [scopeBranches, selectedBranchKey]
+  );
+
+  const modalBranchOptions = useMemo(() => {
+    if (!modalCustomer) return [];
+    return Array.from(
+      new Set(
+        scopeBranches
+          .filter((b) => b.customerName === modalCustomer)
+          .map((b) => b.branchName)
+          .filter((n): n is string => n != null && String(n).trim() !== '')
+      )
+    ).sort((a, b) => a.localeCompare(b));
+  }, [modalCustomer, scopeBranches]);
+
+  /** 고객·지사 선택에 따라 제품 후보 축소 (둘 다 비우면 전체 제품) */
+  const cascadingProductSource = useMemo(() => {
+    let rows = scopeProducts;
+    if (selectedCustomer) rows = rows.filter((r) => r.customerName === selectedCustomer);
+    if (selectedBranchKey !== 'ALL') {
+      const bid = Number(selectedBranchKey);
+      rows = rows.filter((r) => r.branchId === bid);
+    }
+    return rows;
+  }, [scopeProducts, selectedCustomer, selectedBranchKey]);
+
+  // Scope projects: 고객·지사 필터만 적용 (둘 다 비어 있으면 전체 프로젝트 행)
+  const scopedProjects = useMemo(() => {
+    return projectRows.filter((p) => {
+      if (selectedCustomer && p.customerName !== selectedCustomer) return false;
+      if (selectedBranchKey !== 'ALL' && String(p.branchId) !== selectedBranchKey) return false;
+      return true;
+    });
+  }, [projectRows, selectedCustomer, selectedBranchKey]);
+
+  useEffect(() => {
+    let mounted = true;
+    const load = async () => {
+      try {
+        const customersRes = await apiFetch<ApiCustomer[]>(
+          `${SUPPLY_CHAIN_BASE}/project-supply-chain/customers`
+        );
+        if (mounted) {
+          setApiCustomers(customersRes);
+        }
+        const projectsByCustomer = await Promise.all(
+          customersRes.map(async (c) => {
+            const branchesRes = await apiFetch<ApiBranch[]>(
+              `${SUPPLY_CHAIN_BASE}/project-supply-chain/customers/${c.id}/branches`
+            );
+            return Promise.all(
+              branchesRes.map(async (b) => {
+                const p = await apiFetch<ApiProject>(
+                  `${SUPPLY_CHAIN_BASE}/project-supply-chain/branches/${b.id}/project`
+                );
+                const products = await apiFetch<ApiProduct[]>(
+                  `${SUPPLY_CHAIN_BASE}/project-supply-chain/projects/${p.id}/products`
+                );
+
+                const productGroups = await Promise.all(
+                  products.map(async (pr): Promise<ProductGroup> => {
+                    const variants = await apiFetch<ApiProductVariant[]>(
+                      `${SUPPLY_CHAIN_BASE}/project-supply-chain/projects/${p.id}/products/${pr.id}/product-variants`
+                    );
+                    const detailProducts = await Promise.all(
+                      variants.map(async (v): Promise<DetailProduct> => {
+                        let bomCode = '';
+                        try {
+                          const bom = await apiFetch<ApiBom>(
+                            `${SUPPLY_CHAIN_BASE}/project-supply-chain/projects/${p.id}/product-variants/${v.id}/bom`
+                          );
+                          bomCode = bom.code ?? '';
+                        } catch {
+                          bomCode = '';
+                        }
+                        return {
+                          id: String(v.id),
+                          displayName: v.name,
+                          productItemCode: v.code ?? v.name,
+                          bomCode: bomCode || '-',
+                          suppliers: [],
+                        };
+                      })
+                    );
+
+                    return {
+                      id: String(pr.id),
+                      name: pr.name,
+                      productCode: pr.code,
+                      detailProducts,
+                    };
+                  })
+                );
+
+                return {
+                  id: String(p.id),
+                  projectCode: p.code,
+                  customerId: String(c.id),
+                  customerName: c.name,
+                  branchId: String(b.id),
+                  branchName: b.name,
+                  period: `${p.start_date} ~ ${p.end_date}`,
+                  projectName: p.name,
+                  productGroups,
+                } satisfies Project;
+              })
+            );
+          })
+        );
+        const projects: Project[] = projectsByCustomer.flat();
+
+        if (mounted) {
+          setApiProjects(projects);
+          setApiLoadError(null);
+          setIsApiLoaded(true);
+        }
+      } catch (e) {
+        if (mounted) {
+          setApiProjects([]);
+          setIsApiLoaded(true);
+          setApiLoadError(e instanceof Error ? e.message : '알 수 없는 오류');
+          console.error(e);
+          toast.error('공급망 API 조회에 실패했습니다.');
+        }
+      }
+    };
+    void load();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  // 고객 목록 확보 후 전 고객의 지사·제품 메타만 병렬 로드 (BOM/variant 없음 — 필터용)
+  useEffect(() => {
+    if (apiCustomers.length === 0) {
+      setScopeBranchesRaw([]);
+      setScopeProductsRaw([]);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const br: ScopeBranchRow[] = [];
+      const pr: ScopeProductRow[] = [];
+      await Promise.all(
+        apiCustomers.map(async (c) => {
+          try {
+            const branchesRes = await apiFetch<ApiBranch[]>(
+              `${SUPPLY_CHAIN_BASE}/project-supply-chain/customers/${c.id}/branches`
+            );
+            for (const b of branchesRes) {
+              br.push({
+                branchId: b.id,
+                branchName: b.name,
+                customerId: c.id,
+                customerName: c.name,
+              });
+              try {
+                const p = await apiFetch<ApiProject>(
+                  `${SUPPLY_CHAIN_BASE}/project-supply-chain/branches/${b.id}/project`
+                );
+                const products = await apiFetch<ApiProduct[]>(
+                  `${SUPPLY_CHAIN_BASE}/project-supply-chain/projects/${p.id}/products`
+                );
+                for (const prod of products) {
+                  pr.push({
+                    code: prod.code,
+                    name: prod.name,
+                    branchId: b.id,
+                    branchName: b.name,
+                    customerId: c.id,
+                    customerName: c.name,
+                  });
+                }
+              } catch {
+                /* 프로젝트 없음 */
+              }
+            }
+          } catch {
+            /* 고객별 스킵 */
+          }
+        })
+      );
+      if (!cancelled) {
+        setScopeBranchesRaw(br);
+        setScopeProductsRaw(pr);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [apiCustomers]);
+
+  // 상위(고객) 변경 등으로 현재 지사가 후보에 없으면 전체로
+  useEffect(() => {
+    if (selectedBranchKey === 'ALL') return;
+    const valid = branchSelectOptions.some((o) => o.value === selectedBranchKey);
+    if (!valid) setSelectedBranchKey('ALL');
+  }, [branchSelectOptions, selectedBranchKey]);
 
   // Build product groups union by productCode across scoped projects.
   // (제품카테고리가 같아도 BOM(세부제품)이 달라질 수 있으므로 detailProducts를 합칩니다.)
@@ -371,6 +658,86 @@ export default function ProjectSupplyChain() {
     })) as ProductGroup[];
   }, [scopedProjects]);
 
+  // 제품 필터 드롭다운: 캐스케이드 소스에서 코드별 1행 (이름은 첫 매칭)
+  const productFilterRows = useMemo(() => {
+    const seen = new Map<string, string>();
+    cascadingProductSource.forEach((r) => {
+      const code = r.code != null ? String(r.code).trim() : '';
+      if (!code) return;
+      if (!seen.has(code)) seen.set(code, r.name != null ? String(r.name) : code);
+    });
+    return Array.from(seen.entries())
+      .map(([code, name]) => ({ key: code, productCode: code, name }))
+      .sort((a, b) => a.productCode.localeCompare(b.productCode, undefined, { sensitivity: 'base' }));
+  }, [cascadingProductSource]);
+
+  // 고객/지사 변경으로 제품 코드가 후보에서 빠지면 ALL로
+  useEffect(() => {
+    if (selectedProductFilterCode === 'ALL' || selectedProductFilterCode === '') return;
+    const ok = productFilterRows.some((r) => r.productCode === selectedProductFilterCode);
+    if (!ok) setSelectedProductFilterCode('ALL');
+  }, [productFilterRows, selectedProductFilterCode]);
+
+  // 모달: 선택한 프로젝트·카탈로그 제품에 매핑된 SRM 협력사 목록
+  useEffect(() => {
+    if (!showAddSupplierModal) {
+      setModalSuppliers([]);
+      setModalSuppliersError(null);
+      setModalSuppliersLoading(false);
+      return;
+    }
+    const mProjects = projectRows.filter(
+      (p) => p.customerName === modalCustomer && p.branchName === modalBranch,
+    );
+    const rProject = modalProject || mProjects[0]?.id || '';
+    const mPgs = mProjects.find((p) => p.id === rProject)?.productGroups ?? [];
+    const rPg = modalProductGroup || mPgs[0]?.id || '';
+    if (!rProject || !rPg) {
+      setModalSuppliers([]);
+      setModalSuppliersLoading(false);
+      setModalSuppliersError(null);
+      return;
+    }
+    const nProj = Number(rProject);
+    const nProd = Number(rPg);
+    if (!Number.isFinite(nProj) || !Number.isFinite(nProd)) {
+      setModalSuppliers([]);
+      setModalSuppliersLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setModalSupplier('');
+    setModalSuppliersLoading(true);
+    setModalSuppliersError(null);
+    void (async () => {
+      try {
+        const rows = await apiFetch<ApiSupplierBrief[]>(
+          `${SUPPLY_CHAIN_BASE}/project-supply-chain/projects/${nProj}/products/${nProd}/suppliers`,
+        );
+        if (!cancelled) setModalSuppliers(rows);
+      } catch (e) {
+        if (!cancelled) {
+          setModalSuppliers([]);
+          setModalSuppliersError(
+            e instanceof Error ? e.message : '협력사 목록을 불러오지 못했습니다.',
+          );
+        }
+      } finally {
+        if (!cancelled) setModalSuppliersLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    showAddSupplierModal,
+    modalCustomer,
+    modalBranch,
+    modalProject,
+    modalProductGroup,
+    projectRows,
+  ]);
+
   // Apply filter: specific product code or ALL
   const productGroups =
     selectedProductFilterCode === 'ALL'
@@ -391,16 +758,16 @@ export default function ProjectSupplyChain() {
     : detailProducts.find(dp => dp.productItemCode === selectedProductItemCode || dp.id === selectedProductItemCode);
 
   const handleQuery = () => {
-    if (!selectedCustomer) {
-      toast.error('고객사를 선택해주세요');
-      return;
-    }
     if (!selectedProductFilterCode || selectedProductFilterCode === '') {
-      toast.error('제품을 선택해주세요');
+      toast.error('제품 필터를 선택해 주세요 (ALL 가능)');
       return;
     }
     if (productGroups.length === 0) {
-      toast.error('선택 가능한 제품이 없습니다');
+      if (!isApiLoaded) {
+        toast.error('전체 공급망 데이터를 불러오는 중입니다. 잠시 후 다시 조회해 주세요.');
+        return;
+      }
+      toast.error('선택한 조건에 맞는 제품이 없습니다. 고객사·지사·제품 조합을 바꿔 보세요.');
       return;
     }
     setHasQueried(true);
@@ -410,12 +777,12 @@ export default function ProjectSupplyChain() {
   };
 
   const openAddSupplierModal = () => {
-    // 현재 조회 필터를 모달 초기값으로 연결 (유효한 값만 반영)
-    const nextCustomer = selectedCustomer || '';
-    const nextBranch = selectedBranch !== 'ALL' ? selectedBranch : '';
+    // 지사만 먼저 고른 경우 고객명은 지사 행에서 유추
+    const nextCustomer = selectedCustomer || selectedBranchRow?.customerName || '';
+    const nextBranch = selectedBranchRow?.branchName ?? '';
 
     const candidateProjects = nextCustomer && nextBranch
-      ? mockProjects.filter((p) => p.customerName === nextCustomer && p.branchName === nextBranch)
+      ? projectRows.filter((p) => p.customerName === nextCustomer && p.branchName === nextBranch)
       : [];
     const nextProjectId = candidateProjects[0]?.id || '';
 
@@ -573,30 +940,64 @@ export default function ProjectSupplyChain() {
     );
   };
 
-  const handleAddSupplier = () => {
-    const resolvedModalProject = modalProject || modalProjects[0]?.id || '';
-    if (!modalCustomer || !modalBranch || !resolvedModalProject || !modalProductGroup || !modalSupplier) {
-      toast.error('모든 항목을 선택해주세요');
+  const handleAddSupplier = async () => {
+    const mProjects = projectRows.filter(
+      (p) => p.customerName === modalCustomer && p.branchName === modalBranch,
+    );
+    const rProject = modalProject || mProjects[0]?.id || '';
+    const mPgs = mProjects.find((p) => p.id === rProject)?.productGroups ?? [];
+    const rPg = modalProductGroup || mPgs[0]?.id || '';
+    if (!modalCustomer || !modalBranch || !rProject || !rPg || !modalDetailProduct || !modalSupplier) {
+      toast.error('고객사·지사·제품·세부제품·협력사를 모두 선택해 주세요');
       return;
     }
-    // 초대메일 화면에서 "프로젝트/공급망 탭에서 등록된 1차 협력사"만 선택할 수 있도록
-    // 등록 상태를 localStorage에 저장합니다.
-    const selected = mockSupplierList.find(s => s.id === modalSupplier);
+    const nProj = Number(rProject);
+    const nVariant = Number(modalDetailProduct);
+    const nSup = Number(modalSupplier);
+    if (!Number.isFinite(nProj) || !Number.isFinite(nVariant) || !Number.isFinite(nSup)) {
+      toast.error('선택 값이 올바르지 않습니다');
+      return;
+    }
+    const selected = modalSuppliers.find((s) => String(s.id) === modalSupplier);
+    try {
+      await apiFetch(
+        `${SUPPLY_CHAIN_BASE}/project-supply-chain/projects/${nProj}/product-variants/${nVariant}/tier1-suppliers`,
+        { method: 'POST', json: { supplier_id: nSup } },
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : '추가 요청에 실패했습니다.';
+      toast.error(msg);
+      return;
+    }
+
     try {
       if (selected) {
         const prevRaw = localStorage.getItem(LS_REGISTERED_TIER1_SUPPLIERS_KEY);
-        const prev = (prevRaw ? JSON.parse(prevRaw) : []) as Array<{ id: string; name: string; nameEn: string }>;
-        const exists = prev.some(p => p.id === selected.id);
-        const next = exists ? prev : [...prev, { id: selected.id, name: selected.name, nameEn: selected.nameEn }];
+        const prev = (prevRaw ? JSON.parse(prevRaw) : []) as Array<{
+          id: string;
+          name: string;
+          nameEn: string;
+        }>;
+        const sid = String(selected.id);
+        const exists = prev.some((p) => p.id === sid);
+        const next = exists
+          ? prev
+          : [
+              ...prev,
+              {
+                id: sid,
+                name: selected.name,
+                nameEn: selected.code ?? '',
+              },
+            ];
         localStorage.setItem(LS_REGISTERED_TIER1_SUPPLIERS_KEY, JSON.stringify(next));
       }
     } catch {
-      // localStorage 실패해도 UX 흐름은 유지합니다.
+      /* localStorage 실패 무시 */
     }
 
     toast.success('1차 협력사가 추가되었습니다');
     setShowAddSupplierModal(false);
-    // Reset modal states
     setModalCustomer('');
     setModalBranch('');
     setModalProject('');
@@ -604,10 +1005,12 @@ export default function ProjectSupplyChain() {
     setModalDetailProduct('');
     setModalSupplier('');
     setSupplierSearchTerm('');
+    setModalSuppliers([]);
+    setModalSuppliersError(null);
   };
 
   // Modal: projects for selected customer+branch
-  const modalProjects = mockProjects.filter(
+  const modalProjects = projectRows.filter(
     p => p.customerName === modalCustomer && p.branchName === modalBranch
   );
   const resolvedModalProject = modalProject || modalProjects[0]?.id || '';
@@ -619,10 +1022,15 @@ export default function ProjectSupplyChain() {
       ?.detailProducts.find(dp => dp.id === modalDetailProduct) || null;
   const selectedModalBomCode = selectedModalDetailProduct?.bomCode || '';
 
-  const filteredSuppliers = mockSupplierList.filter(supplier =>
-    supplier.name.toLowerCase().includes(supplierSearchTerm.toLowerCase()) ||
-    supplier.nameEn.toLowerCase().includes(supplierSearchTerm.toLowerCase())
-  );
+  const filteredSuppliers = useMemo(() => {
+    const q = supplierSearchTerm.trim().toLowerCase();
+    if (!q) return modalSuppliers;
+    return modalSuppliers.filter(
+      (s) =>
+        s.name.toLowerCase().includes(q) ||
+        (s.code ?? '').toLowerCase().includes(q),
+    );
+  }, [modalSuppliers, supplierSearchTerm]);
 
   return (
     <div className="min-h-screen bg-[#F6F8FB]">
@@ -636,7 +1044,7 @@ export default function ProjectSupplyChain() {
           <button
             onClick={() => isProcurementView && openAddSupplierModal()}
             disabled={!isProcurementView}
-            title={!isProcurementView ? '1차 협력사 추가는 구매 직무에서만 사용할 수 있습니다' : undefined}
+            title={!isProcurementView ? '1차 협력사 추가는 구매 관점에서만 사용할 수 있습니다' : undefined}
             className="flex items-center gap-2 px-4 py-2 bg-white border-2 rounded-xl font-medium transition-all hover:bg-purple-50 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-white whitespace-nowrap"
             style={{
               borderColor: isProcurementView ? '#5B3BFA' : '#d1d5db',
@@ -653,17 +1061,14 @@ export default function ProjectSupplyChain() {
           <div className="grid grid-cols-3 gap-4 mb-4">
             {/* Customer */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">고객사 <span style={{ color: '#EF4444' }}>*</span></label>
+              <label className="block text-sm font-medium text-gray-700 mb-2">고객사</label>
+              <p className="text-xs text-gray-500 mb-1.5">순서 무관 · 고객을 고르면 지사·제품 후보만 줄어듭니다.</p>
               <select
                 value={selectedCustomer}
-                onChange={(e) => {
-                  setSelectedCustomer(e.target.value);
-                  setSelectedBranch('ALL');
-                  setSelectedProductFilterCode('ALL');
-                }}
+                onChange={(e) => setSelectedCustomer(e.target.value)}
                 className="w-full px-4 py-2.5 border border-gray-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
               >
-                <option value="">선택</option>
+                <option value="">전체</option>
                 {customers.map((customer) => (
                   <option key={customer} value={customer}>
                     {customer}
@@ -675,17 +1080,16 @@ export default function ProjectSupplyChain() {
             {/* Branch */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">세부 지사</label>
+              <p className="text-xs text-gray-500 mb-1.5">고객 미선택 시 &quot;고객명 · 지사명&quot;으로 표시됩니다.</p>
               <select
-                value={selectedBranch}
-                onChange={(e) => {
-                  setSelectedBranch(e.target.value);
-                  setSelectedProductFilterCode('ALL');
-                }}
+                value={selectedBranchKey}
+                onChange={(e) => setSelectedBranchKey(e.target.value)}
                 className="w-full px-4 py-2.5 border border-gray-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
               >
-                {branches.map((branch) => (
-                  <option key={branch} value={branch}>
-                    {branch}
+                <option value="ALL">전체</option>
+                {branchSelectOptions.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
                   </option>
                 ))}
               </select>
@@ -694,6 +1098,7 @@ export default function ProjectSupplyChain() {
             {/* Product */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">제품</label>
+              <p className="text-xs text-gray-500 mb-1.5">고객/지사를 고르면 목록이 좁혀집니다.</p>
               <select
                 value={selectedProductFilterCode}
                 onChange={(e) => setSelectedProductFilterCode(e.target.value)}
@@ -701,9 +1106,9 @@ export default function ProjectSupplyChain() {
               >
                 <option value="">선택</option>
                 <option value="ALL">ALL</option>
-                {productGroupsUnion.map((pg) => (
-                  <option key={pg.productCode} value={pg.productCode}>
-                    {pg.name} ({pg.productCode})
+                {productFilterRows.map((row) => (
+                  <option key={row.key} value={row.productCode}>
+                    {row.name} ({row.productCode})
                   </option>
                 ))}
               </select>
@@ -762,10 +1167,10 @@ export default function ProjectSupplyChain() {
               {/* Project Info Badges (코드 기반) */}
               <div className="flex items-center gap-2 mb-4 flex-wrap">
                 <div className="px-3 py-1.5 rounded-lg text-xs font-medium" style={{ background: '#E9F5FF', color: '#2A64E0' }}>
-                  Customer: {selectedCustomer || '-'}
+                  Customer: {selectedCustomer || '전체'}
                 </div>
                 <div className="px-3 py-1.5 rounded-lg text-xs font-medium" style={{ background: '#E9F5FF', color: '#2A64E0' }}>
-                  Branch: {selectedBranch !== 'ALL' ? selectedBranch : '-'}
+                  Branch: {selectedBranchRow ? selectedBranchRow.branchName : '전체'}
                 </div>
                 <div className="px-3 py-1.5 rounded-lg text-xs font-medium" style={{ background: '#E9F5FF', color: '#2A64E0' }}>
                   Product: {currentProductGroup.name}
@@ -805,9 +1210,9 @@ export default function ProjectSupplyChain() {
                 <h2 className="text-xl font-bold text-gray-900">공급망 구조</h2>
                 
                 <div className="flex items-center gap-3">
-                  {/* Detail Product Selector - 제품 탭에 연동 */}
+                  {/* Detail Product Selector (BOM 단위) - 제품 탭에 연동 */}
                   <div className="flex items-center gap-2">
-                    <label className="text-sm font-medium text-gray-700 whitespace-nowrap">세부제품</label>
+                    <label className="text-sm font-medium text-gray-700 whitespace-nowrap">세부제품 (BOM 단위)</label>
                     <select
                       value={selectedProductItemCode}
                       onChange={(e) => setSelectedProductItemCode(e.target.value)}
@@ -854,7 +1259,15 @@ export default function ProjectSupplyChain() {
         {/* Empty State */}
         {!hasQueried && (
           <div className="bg-white rounded-2xl p-12 text-center" style={{ boxShadow: '0px 4px 16px rgba(0, 0, 0, 0.05)' }}>
-            <p className="text-gray-500">조회 조건을 선택하고 조회하기 버튼을 클릭하세요</p>
+            <p className="text-gray-500">
+              {!isApiLoaded
+                ? '실제 데이터 불러오는 중...'
+                : apiLoadError
+                  ? `공급망 API 조회 실패: ${apiLoadError}`
+                  : customers.length === 0
+                    ? 'DB에서 조회된 공급망 데이터가 없습니다.'
+                    : '조회 조건을 선택하고 조회하기 버튼을 클릭하세요'}
+            </p>
           </div>
         )}
       </div>
@@ -904,7 +1317,7 @@ export default function ProjectSupplyChain() {
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
                     >
                       <option value="">선택</option>
-                      {branches.filter(b => b !== 'ALL').map((branch) => (
+                      {modalBranchOptions.map((branch) => (
                         <option key={branch} value={branch}>
                           {branch}
                         </option>
@@ -936,7 +1349,7 @@ export default function ProjectSupplyChain() {
                     </select>
                   </div>
                   <div>
-                    <label className="block text-xs text-gray-600 mb-1">세부제품</label>
+                    <label className="block text-xs text-gray-600 mb-1">세부제품 (BOM 단위)</label>
                     <select
                       value={modalDetailProduct}
                       onChange={(e) => setModalDetailProduct(e.target.value)}
@@ -978,17 +1391,40 @@ export default function ProjectSupplyChain() {
                   />
                 </div>
                 <div className="mt-2 max-h-40 overflow-y-auto border border-gray-200 rounded-lg">
-                  {filteredSuppliers.map((supplier) => (
-                    <button
-                      key={supplier.id}
-                      onClick={() => setModalSupplier(supplier.id)}
-                      className={`w-full text-left px-4 py-2 hover:bg-gray-50 transition-colors ${
-                        modalSupplier === supplier.id ? 'bg-purple-50 text-purple-600' : 'text-gray-700'
-                      }`}
-                    >
-                      {supplier.name} <span className="text-sm text-gray-500">({supplier.nameEn})</span>
-                    </button>
-                  ))}
+                  {modalSuppliersLoading && (
+                    <div className="px-4 py-3 text-sm text-gray-500">협력사 목록 불러오는 중…</div>
+                  )}
+                  {!modalSuppliersLoading && modalSuppliersError && (
+                    <div className="px-4 py-3 text-sm text-red-600">{modalSuppliersError}</div>
+                  )}
+                  {!modalSuppliersLoading &&
+                    !modalSuppliersError &&
+                    filteredSuppliers.length === 0 && (
+                      <div className="px-4 py-3 text-sm text-gray-500">
+                        {modalCustomer && modalBranch && (modalProductGroup || modalProductGroups[0]?.id)
+                          ? '이 제품(opr_suppliers.product_id)에 등록된 SRM 협력사가 없습니다.'
+                          : '고객사·지사·제품을 선택하면 해당 제품에 묶인 협력사만 표시됩니다.'}
+                      </div>
+                    )}
+                  {!modalSuppliersLoading &&
+                    !modalSuppliersError &&
+                    filteredSuppliers.map((supplier) => (
+                      <button
+                        key={supplier.id}
+                        type="button"
+                        onClick={() => setModalSupplier(String(supplier.id))}
+                        className={`w-full text-left px-4 py-2 hover:bg-gray-50 transition-colors ${
+                          modalSupplier === String(supplier.id)
+                            ? 'bg-purple-50 text-purple-600'
+                            : 'text-gray-700'
+                        }`}
+                      >
+                        {supplier.name}
+                        {supplier.code ? (
+                          <span className="text-sm text-gray-500"> ({supplier.code})</span>
+                        ) : null}
+                      </button>
+                    ))}
                 </div>
               </div>
             </div>
@@ -1005,6 +1441,8 @@ export default function ProjectSupplyChain() {
                   setModalDetailProduct('');
                   setModalSupplier('');
                   setSupplierSearchTerm('');
+                  setModalSuppliers([]);
+                  setModalSuppliersError(null);
                 }}
                 className="px-6 py-2.5 border border-gray-300 rounded-xl text-gray-700 font-medium hover:bg-gray-50 transition-colors"
               >
