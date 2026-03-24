@@ -12,7 +12,7 @@ import {
 } from './ui/dropdown-menu';
 
 export default function Layout({ children }: { children: React.ReactNode }) {
-  const { mode, toggleMode } = useMode();
+  const { mode, toggleMode, isPurchasePerspectiveLocked } = useMode();
   const pathname = usePathname();
   const router = useRouter();
   
@@ -83,22 +83,34 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               {/* 직무 모드 토글 */}
               <div className="flex items-center bg-gray-100 rounded-lg p-1">
                 <button
+                  type="button"
                   onClick={() => mode !== 'procurement' && toggleMode()}
                   className={`px-4 py-2 rounded-md text-base font-medium transition-all ${
                     mode === 'procurement'
                       ? 'bg-white text-[#5B3BFA] shadow-sm'
                       : 'text-gray-600 hover:text-gray-900'
-                  }`}
+                  } ${isPurchasePerspectiveLocked ? 'cursor-default' : ''}`}
                 >
                   구매 직무
                 </button>
                 <div className="w-px h-4 bg-gray-300 mx-1"></div>
                 <button
+                  type="button"
                   onClick={() => mode !== 'pcf' && toggleMode()}
+                  disabled={isPurchasePerspectiveLocked}
+                  title={
+                    isPurchasePerspectiveLocked
+                      ? '구매 직무 계정은 ESG 직무로 전환할 수 없습니다.'
+                      : undefined
+                  }
                   className={`px-4 py-2 rounded-md text-base font-medium transition-all ${
                     mode === 'pcf'
                       ? 'bg-white text-[#00B4FF] shadow-sm'
                       : 'text-gray-600 hover:text-gray-900'
+                  } ${
+                    isPurchasePerspectiveLocked
+                      ? 'opacity-50 cursor-not-allowed text-gray-400 hover:text-gray-400'
+                      : ''
                   }`}
                 >
                   ESG 직무
@@ -157,8 +169,17 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             <div className="bg-gradient-to-r from-purple-50 to-blue-50 border-l-4 border-[#5B3BFA] p-6 rounded-xl shadow-lg max-w-md">
               <h3 className="font-semibold text-[#5B3BFA] mb-2">구매 직무 - PCF 산정 접근 제한</h3>
               <p className="text-sm text-gray-700">
-                PCF 산정 화면은 ESG 직무에서만 사용할 수 있습니다.
-                우측 상단에서 &quot;ESG 직무&quot;로 전환하면 이 화면을 이용할 수 있습니다.
+                {isPurchasePerspectiveLocked ? (
+                  <>
+                    구매 직무로 등록된 계정은 PCF 산정 화면을 사용할 수 없습니다. 이 화면은
+                    ESG 직무 계정에서만 이용 가능합니다.
+                  </>
+                ) : (
+                  <>
+                    PCF 산정 화면은 ESG 직무에서만 사용할 수 있습니다.
+                    우측 상단에서 &quot;ESG 직무&quot;로 전환하면 이 화면을 이용할 수 있습니다.
+                  </>
+                )}
               </p>
             </div>
           </div>
