@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { Building2, Bell, Settings as SettingsIcon, LogOut } from 'lucide-react';
+import { clearOprSession } from '@/lib/api/auth';
 import { useMode } from '../context/ModeContext';
 import {
   DropdownMenu,
@@ -15,6 +16,12 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   const { mode, toggleMode, isPurchasePerspectiveLocked } = useMode();
   const pathname = usePathname();
   const router = useRouter();
+
+  const handleLogout = async () => {
+    await clearOprSession();
+    router.push('/');
+    router.refresh();
+  };
   
   // Base navigation items (always visible)
   const baseNavItems = [
@@ -148,7 +155,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                   <DropdownMenuContent align="end" className="w-40">
                     <DropdownMenuItem
                       variant="destructive"
-                      onClick={() => router.push('/')}
+                      onClick={handleLogout}
                       className="cursor-pointer"
                     >
                       <LogOut className="mr-2 h-4 w-4" />

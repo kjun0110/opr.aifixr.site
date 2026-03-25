@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import { ModeProvider } from './context/ModeContext';
+import OprSessionRestore from './components/OprSessionRestore';
 import { Toaster } from './components/ui/sonner';
 import '../styles/index.css';
 
@@ -17,6 +18,7 @@ export default function RootLayout({
     <html lang="ko">
       <body>
         <ModeProvider>
+          <OprSessionRestore />
           {children}
           <Toaster />
         </ModeProvider>

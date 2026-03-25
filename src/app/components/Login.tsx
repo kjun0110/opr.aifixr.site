@@ -3,7 +3,11 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Building2, Mail, Lock } from 'lucide-react';
-import { loginOprAndStoreSession, OprLoginFailedError } from '@/lib/api/auth';
+import {
+  getOprGoogleLinkAuthUrl,
+  loginOprAndStoreSession,
+  OprLoginFailedError,
+} from '@/lib/api/auth';
 
 export default function Login() {
   const router = useRouter();
@@ -30,7 +34,18 @@ export default function Login() {
     setSubmitting(true);
     try {
       await loginOprAndStoreSession(email, password);
-      router.push('/dashboard');
+      // DB 검증 후 동일 세션으로 Google OAuth 연동(게이트웨이 → KJ 저장)
+      try {
+        const authUrl = await getOprGoogleLinkAuthUrl();
+        window.location.assign(authUrl);
+      } catch (linkErr) {
+        setLoginError(
+          linkErr instanceof Error
+            ? `Google 연동 시작 실패: ${linkErr.message}`
+            : 'Google 연동 시작에 실패했습니다.',
+        );
+        router.push('/dashboard');
+      }
     } catch (err) {
       if (err instanceof OprLoginFailedError) {
         setLoginError(err.message);
@@ -44,9 +59,19 @@ export default function Login() {
     }
   };
 
-  const handleSSOLogin = () => {
+  const handleSSOLogin = async () => {
     setLoginError(null);
-    setLoginError('회사 계정(SSO) 로그인은 아직 연결되지 않았습니다.');
+    setSubmitting(true);
+    try {
+      const authUrl = await getOprGoogleLinkAuthUrl();
+      window.location.assign(authUrl);
+    } catch {
+      setLoginError(
+        'Google 연동을 시작하려면 먼저 이메일·비밀번호로 로그인해 주세요.',
+      );
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (

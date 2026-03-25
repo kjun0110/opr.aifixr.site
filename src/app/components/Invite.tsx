@@ -4,11 +4,150 @@ import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 import { Upload, Plus, FileText, Eye, Send, CheckCircle, Clock, AlertCircle, Check, XCircle, ShieldAlert } from 'lucide-react';
 import { toast } from 'sonner';
 import { useMode } from '../context/ModeContext';
+import { getInvitationHistory, postOprInvitation, type InvitationHistoryItem } from '@/lib/api/invitation';
+
+type Recipient = { company: string; email: string; contactName: string; scopeId?: string };
+type Tier1Supplier = {
+  id: string;
+  name: string;
+  nameEn?: string;
+  supplierId?: number;
+  projectId?: number;
+  productId?: number;
+  productVariantId?: number;
+};
+
+type RecipientCardProps = {
+  index: number;
+  recipient: Recipient;
+  onChange: (next: Recipient) => void;
+  onRemove?: () => void;
+  eligibleTier1Suppliers: Array<Tier1Supplier>;
+  supplierEmailById: Record<string, string>;
+};
+
+function RecipientCard({
+  index,
+  recipient,
+  onChange,
+  onRemove,
+  eligibleTier1Suppliers,
+  supplierEmailById,
+}: RecipientCardProps) {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+
+  const filtered = useMemo(() => {
+    const q = recipient.company.trim().toLowerCase();
+    if (!q) return eligibleTier1Suppliers;
+    return eligibleTier1Suppliers.filter(
+      s =>
+        s.name.trim().toLowerCase().includes(q) || (s.nameEn ?? '').toLowerCase().includes(q),
+    );
+  }, [recipient.company, eligibleTier1Suppliers]);
+
+  useEffect(() => {
+    const onMouseDown = (e: MouseEvent) => {
+      const el = wrapRef.current;
+      if (!el) return;
+      if (!el.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onMouseDown);
+    return () => document.removeEventListener('mousedown', onMouseDown);
+  }, []);
+
+  return (
+    <div className="p-4 border border-gray-200 rounded-2xl bg-white">
+      <div className="flex items-start justify-between gap-3 mb-4">
+        <div className="text-sm font-semibold text-gray-900">발신인 {index + 1}</div>
+        {index > 0 && onRemove && (
+          <button
+            type="button"
+            onClick={onRemove}
+            className="p-1.5 rounded-lg hover:bg-gray-100 transition-all"
+            aria-label="발신인 카드 삭제"
+            title="삭제"
+          >
+            <XCircle size={18} className="text-gray-500" />
+          </button>
+        )}
+      </div>
+
+      <div className="space-y-3">
+        <div>
+          <label className="block text-sm font-semibold text-gray-700 mb-2">회사명</label>
+          <div ref={wrapRef} className="relative">
+            <input
+              type="text"
+              value={recipient.company}
+              onChange={(e) => onChange({ ...recipient, company: e.target.value, scopeId: undefined })}
+              onFocus={() => setOpen(true)}
+              placeholder="회사명 (등록된 1차 협력사)"
+              className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500 text-sm"
+            />
+
+            {open && (
+              <div className="absolute left-0 right-0 z-20 mt-2 bg-white border border-gray-200 rounded-xl shadow-lg overflow-hidden">
+                {filtered.length === 0 ? (
+                  <div className="px-4 py-2 text-sm text-gray-500">검색 결과가 없습니다</div>
+                ) : (
+                  filtered.map(s => (
+                    <button
+                      key={s.id}
+                      type="button"
+                      onClick={() => {
+                        onChange({
+                          ...recipient,
+                          company: s.name,
+                          scopeId: s.id,
+                          email: recipient.email.trim()
+                            ? recipient.email
+                            : (supplierEmailById[s.id] ?? ''),
+                        });
+                        setOpen(false);
+                      }}
+                      className="w-full text-left px-4 py-2.5 hover:bg-purple-50 transition-all"
+                    >
+                      <div className="text-sm font-medium text-gray-900">{s.name}</div>
+                      {s.nameEn ? <div className="text-xs text-gray-500">{s.nameEn}</div> : null}
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 gap-3">
+          <div>
+            <label className="block text-sm font-semibold text-gray-700 mb-2">담당자 이름</label>
+            <input
+              type="text"
+              value={recipient.contactName}
+              onChange={(e) => onChange({ ...recipient, contactName: e.target.value })}
+              placeholder="담당자 이름"
+              className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500 text-sm"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-semibold text-gray-700 mb-2">담당자 이메일</label>
+            <input
+              type="email"
+              value={recipient.email}
+              onChange={(e) => onChange({ ...recipient, email: e.target.value })}
+              placeholder="이메일"
+              className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500 text-sm"
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default function Invite() {
   const { mode } = useMode();
-  type Recipient = { company: string; email: string; contactName: string };
-  type Tier1Supplier = { id: string; name: string; nameEn?: string };
 
   const LS_REGISTERED_TIER1_SUPPLIERS_KEY = 'aifix_mock_registered_tier1_suppliers_v1';
 
@@ -50,25 +189,56 @@ https://aifix.com/signup
     // "프로젝트 / 공급망 관리"에서 1차 협력사로 등록된 목록만 초대에서 선택할 수 있습니다.
     try {
       const raw = localStorage.getItem(LS_REGISTERED_TIER1_SUPPLIERS_KEY);
-      const parsed = raw ? (JSON.parse(raw) as Array<Tier1Supplier>) : [];
-      setEligibleTier1Suppliers(parsed);
+      const parsed = raw ? (JSON.parse(raw) as Array<Record<string, unknown>>) : [];
+      const normalized: Tier1Supplier[] = parsed
+        .map((it, idx) => ({
+          id: String(it.id ?? `${idx}`),
+          name: String(it.name ?? ''),
+          nameEn: typeof it.nameEn === 'string' ? it.nameEn : undefined,
+          supplierId: typeof it.supplierId === 'number' ? it.supplierId : undefined,
+          projectId: typeof it.projectId === 'number' ? it.projectId : undefined,
+          productId: typeof it.productId === 'number' ? it.productId : undefined,
+          productVariantId:
+            typeof it.productVariantId === 'number' ? it.productVariantId : undefined,
+        }))
+        .filter((it) => it.name.trim().length > 0);
+      setEligibleTier1Suppliers(normalized);
+      // 초대 페이지 진입 시 최근 이력 조회
+      void getInvitationHistory({ limit: 50 })
+        .then((rows) => {
+          const mapped = rows.map((r: InvitationHistoryItem) => ({
+            company: r.invitee_company_hint || '-',
+            email: r.invitee_email || '-',
+            sentDate: new Date(r.created_at).toLocaleString(),
+            version: 'v2.0',
+            status: r.status === 'failed' ? 'failed' : 'sent',
+            opened: r.status === 'in_progress' || r.status === 'completed',
+            projectAccess:
+              r.status === 'completed'
+                ? 'approved'
+                : r.status === 'rejected'
+                  ? 'rejected'
+                  : 'pending',
+          }));
+          setSentHistory(mapped);
+        })
+        .catch(() => {
+          // 이력 API 실패 시 기존 mock 표시 유지
+        });
     } catch {
       setEligibleTier1Suppliers([]);
     }
   }, []);
 
   const supplierEmailById = useMemo(() => {
-    // mock email mapping (등록된 공급사 id로부터 이메일을 자동 채움)
-    return {
-      'sup-1': 'contact@koreabattery.com',
-      'sup-2': 'info@globalmaterials.com',
-      'sup-3': 'contact@asiachemical.com',
-      'sup-4': 'contact@europebattery.com',
-      'sup-5': 'contact@japancell.com',
-    } as Record<string, string>;
+    return {} as Record<string, string>;
   }, []);
 
-  const normalizeTier1Company = (companyInput: string) => {
+  const normalizeTier1Company = (companyInput: string, scopeId?: string) => {
+    if (scopeId) {
+      const byScope = eligibleTier1Suppliers.find(s => s.id === scopeId);
+      if (byScope) return byScope;
+    }
     const normalizedCompany = companyInput.trim().toLowerCase();
     if (!normalizedCompany) return undefined;
 
@@ -89,7 +259,7 @@ https://aifix.com/signup
     setRecipients(prev => [...prev, { company: '', email: '', contactName: '' }]);
   };
 
-  const handleSend = () => {
+  const handleSend = async () => {
     const nonEmptyCards = recipients.filter(r => r.company.trim() || r.email.trim() || r.contactName.trim());
 
     if (nonEmptyCards.length === 0) {
@@ -111,138 +281,66 @@ https://aifix.com/signup
         return;
       }
 
-      const matched = normalizeTier1Company(r.company);
+      const matched = normalizeTier1Company(r.company, r.scopeId);
       if (!matched) {
         toast.error('등록된 1차 협력사에서 회사를 선택해주세요');
         return;
       }
+      if (!matched.projectId || !matched.productVariantId || !matched.supplierId) {
+        toast.error('공급망에서 등록한 1차 협력사 항목을 다시 선택해 주세요');
+        return;
+      }
     }
 
-    toast.success(`${nonEmptyCards.length}개 업체에 초대 메일이 발송되었습니다`);
-    setRecipients([{ company: '', email: '', contactName: '' }]);
+    let success = 0;
+    const failMessages: string[] = [];
+    for (const r of nonEmptyCards) {
+      const matched = normalizeTier1Company(r.company, r.scopeId);
+      if (!matched?.supplierId || !matched.productVariantId) continue;
+      try {
+        await postOprInvitation({
+          product_variant_id: matched.productVariantId,
+          supplier_id: matched.supplierId,
+          invitee: {
+            company_name: r.company.trim(),
+            contact_name: r.contactName.trim(),
+            email: r.email.trim(),
+          },
+          expire_days: 3,
+        });
+        success += 1;
+      } catch (e) {
+        failMessages.push(e instanceof Error ? e.message : '발송 실패');
+      }
+    }
+    if (success > 0) {
+      toast.success(`${success}건 초대 메일 발송 완료`);
+      setRecipients([{ company: '', email: '', contactName: '' }]);
+      try {
+        const rows = await getInvitationHistory({ limit: 50 });
+        const mapped = rows.map((r: InvitationHistoryItem) => ({
+          company: r.invitee_company_hint || '-',
+          email: r.invitee_email || '-',
+          sentDate: new Date(r.created_at).toLocaleString(),
+          version: 'v2.0',
+          status: r.status === 'failed' ? 'failed' : 'sent',
+          opened: r.status === 'in_progress' || r.status === 'completed',
+          projectAccess:
+            r.status === 'completed'
+              ? 'approved'
+              : r.status === 'rejected'
+                ? 'rejected'
+                : 'pending',
+        }));
+        setSentHistory(mapped);
+      } catch {
+        // ignore refresh fail
+      }
+    }
+    if (failMessages.length > 0) {
+      toast.error(`실패 ${failMessages.length}건: ${failMessages[0]}`);
+    }
   };
-
-  function RecipientCard({
-    index,
-    recipient,
-    onChange,
-    onRemove,
-  }: {
-    index: number;
-    recipient: Recipient;
-    onChange: (next: Recipient) => void;
-    onRemove?: () => void;
-  }) {
-    const [open, setOpen] = useState(false);
-    const wrapRef = useRef<HTMLDivElement | null>(null);
-
-    const filtered = useMemo(() => {
-      const q = recipient.company.trim().toLowerCase();
-      if (!q) return eligibleTier1Suppliers;
-      return eligibleTier1Suppliers.filter(
-        s =>
-          s.name.trim().toLowerCase().includes(q) || (s.nameEn ?? '').toLowerCase().includes(q),
-      );
-    }, [recipient.company, eligibleTier1Suppliers]);
-
-    useEffect(() => {
-      const onMouseDown = (e: MouseEvent) => {
-        const el = wrapRef.current;
-        if (!el) return;
-        if (!el.contains(e.target as Node)) setOpen(false);
-      };
-      document.addEventListener('mousedown', onMouseDown);
-      return () => document.removeEventListener('mousedown', onMouseDown);
-    }, []);
-
-    return (
-      <div className="p-4 border border-gray-200 rounded-2xl bg-white">
-        <div className="flex items-start justify-between gap-3 mb-4">
-          <div className="text-sm font-semibold text-gray-900">발신인 {index + 1}</div>
-          {index > 0 && onRemove && (
-            <button
-              type="button"
-              onClick={onRemove}
-              className="p-1.5 rounded-lg hover:bg-gray-100 transition-all"
-              aria-label="발신인 카드 삭제"
-              title="삭제"
-            >
-              <XCircle size={18} className="text-gray-500" />
-            </button>
-          )}
-        </div>
-
-        <div className="space-y-3">
-          <div>
-            <label className="block text-sm font-semibold text-gray-700 mb-2">회사명</label>
-            <div ref={wrapRef} className="relative">
-              <input
-                type="text"
-                value={recipient.company}
-                onChange={(e) => onChange({ ...recipient, company: e.target.value })}
-                onFocus={() => setOpen(true)}
-                placeholder="회사명 (등록된 1차 협력사)"
-                className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500 text-sm"
-              />
-
-              {open && (
-                <div className="absolute left-0 right-0 z-20 mt-2 bg-white border border-gray-200 rounded-xl shadow-lg overflow-hidden">
-                  {filtered.length === 0 ? (
-                    <div className="px-4 py-2 text-sm text-gray-500">검색 결과가 없습니다</div>
-                  ) : (
-                    filtered.map(s => (
-                      <button
-                        key={s.id}
-                        type="button"
-                        onClick={() => {
-                          onChange({
-                            ...recipient,
-                            company: s.name,
-                            email: recipient.email.trim()
-                              ? recipient.email
-                              : (supplierEmailById[s.id] ?? ''),
-                          });
-                          setOpen(false);
-                        }}
-                        className="w-full text-left px-4 py-2.5 hover:bg-purple-50 transition-all"
-                      >
-                        <div className="text-sm font-medium text-gray-900">{s.name}</div>
-                        {s.nameEn ? <div className="text-xs text-gray-500">{s.nameEn}</div> : null}
-                      </button>
-                    ))
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 gap-3">
-            <div>
-              <label className="block text-sm font-semibold text-gray-700 mb-2">담당자 이름</label>
-              <input
-                type="text"
-                value={recipient.contactName}
-                onChange={(e) => onChange({ ...recipient, contactName: e.target.value })}
-                placeholder="담당자 이름"
-                className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500 text-sm"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-semibold text-gray-700 mb-2">담당자 이메일</label>
-              <input
-                type="email"
-                value={recipient.email}
-                onChange={(e) => onChange({ ...recipient, email: e.target.value })}
-                placeholder="이메일"
-                className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500 text-sm"
-              />
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
 
   const parseCSVLine = (line: string) => {
     // 간단한 CSV 파서(콤마 + 큰따옴표 처리)
@@ -468,6 +566,8 @@ https://aifix.com/signup
                       key={idx}
                       index={idx}
                       recipient={recipient}
+                      eligibleTier1Suppliers={eligibleTier1Suppliers}
+                      supplierEmailById={supplierEmailById}
                       onChange={(next) => {
                         setRecipients(prev => prev.map((r, i) => (i === idx ? next : r)));
                       }}

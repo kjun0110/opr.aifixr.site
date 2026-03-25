@@ -1,9 +1,16 @@
-import { PATH_API_TEST, PATH_HEALTH } from "./paths";
+import {
+  PATH_API_TEST,
+  PATH_AUTH_OPR_LOGOUT,
+  PATH_AUTH_OPR_REFRESH,
+  PATH_HEALTH,
+} from "./paths";
+import { setOprAccessToken, getOprAccessToken } from "./sessionAccessToken";
 
 const DEFAULT_ACTOR_STORAGE_KEY = "x-actor-user-id";
 
-/** 게이트웨이 JWT (원청 로그인 성공 시 저장) */
+/** @deprecated 토큰은 메모리(sessionAccessToken)만 사용 */
 export const ACCESS_TOKEN_STORAGE_KEY = "aifixr-access-token";
+/** @deprecated 리프레시는 HttpOnly 쿠키 */
 export const REFRESH_TOKEN_STORAGE_KEY = "aifixr-refresh-token";
 
 /** 로그인 응답 `user.department` (예: purchase | esg). 구매 직무 고정 시 관점 토글에 사용 */
@@ -38,17 +45,62 @@ export function apiUrl(path: string): string {
 
 export type ApiClientOptions = Omit<RequestInit, "body"> & {
   json?: unknown;
+  /** true면 401 시 리프레시 1회 후 원 요청 재시도 (기본 true) */
+  retryOn401?: boolean;
 };
+
+let refreshInFlight: Promise<boolean> | null = null;
+
+async function postOprRefresh(): Promise<boolean> {
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = (async () => {
+    try {
+      const res = await fetch(apiUrl(PATH_AUTH_OPR_REFRESH), {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!res.ok) {
+        setOprAccessToken(null);
+        return false;
+      }
+      const data = (await res.json()) as {
+        accessToken: string;
+        user?: { id?: string; department?: string | null };
+      };
+      if (!data.accessToken) {
+        setOprAccessToken(null);
+        return false;
+      }
+      setOprAccessToken(data.accessToken);
+      if (typeof window !== "undefined" && data.user?.id) {
+        localStorage.setItem(actorStorageKey(), data.user.id);
+        const dept = data.user.department?.trim();
+        if (dept) {
+          localStorage.setItem(OPR_DEPARTMENT_STORAGE_KEY, dept);
+        } else {
+          localStorage.removeItem(OPR_DEPARTMENT_STORAGE_KEY);
+        }
+      }
+      return true;
+    } catch {
+      setOprAccessToken(null);
+      return false;
+    } finally {
+      refreshInFlight = null;
+    }
+  })();
+  return refreshInFlight;
+}
 
 export async function apiFetch<T = unknown>(
   path: string,
   options: ApiClientOptions = {},
 ): Promise<T> {
-  const { json, headers: initHeaders, ...rest } = options;
+  const { json, headers: initHeaders, retryOn401 = true, ...rest } = options;
   const headers = new Headers(initHeaders);
 
   if (typeof window !== "undefined") {
-    const token = localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY);
+    const token = getOprAccessToken();
     if (token && !headers.has("Authorization")) {
       headers.set("Authorization", `Bearer ${token}`);
     }
@@ -62,11 +114,45 @@ export async function apiFetch<T = unknown>(
     headers.set("Content-Type", "application/json");
   }
 
-  const res = await fetch(apiUrl(path), {
-    ...rest,
-    headers,
-    body: json !== undefined ? JSON.stringify(json) : (rest as RequestInit).body,
-  });
+  const doFetch = () =>
+    fetch(apiUrl(path), {
+      ...rest,
+      credentials: rest.credentials ?? "include",
+      headers,
+      body: json !== undefined ? JSON.stringify(json) : (rest as RequestInit).body,
+    });
+
+  let res = await doFetch();
+
+  if (
+    res.status === 401 &&
+    retryOn401 &&
+    typeof window !== "undefined" &&
+    !path.startsWith(PATH_AUTH_OPR_REFRESH) &&
+    path !== PATH_AUTH_OPR_LOGOUT
+  ) {
+    const ok = await postOprRefresh();
+    if (ok) {
+      const h2 = new Headers(initHeaders);
+      const t2 = getOprAccessToken();
+      if (t2 && !h2.has("Authorization")) {
+        h2.set("Authorization", `Bearer ${t2}`);
+      }
+      const actor2 = localStorage.getItem(actorStorageKey());
+      if (actor2 && !h2.has("X-Actor-User-Id")) {
+        h2.set("X-Actor-User-Id", actor2);
+      }
+      if (json !== undefined) {
+        h2.set("Content-Type", "application/json");
+      }
+      res = await fetch(apiUrl(path), {
+        ...rest,
+        credentials: rest.credentials ?? "include",
+        headers: h2,
+        body: json !== undefined ? JSON.stringify(json) : (rest as RequestInit).body,
+      });
+    }
+  }
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
@@ -85,6 +171,24 @@ export async function apiFetch<T = unknown>(
   return (await res.text()) as T;
 }
 
+/** 앱 로드 시 리프레시 쿠키가 있으면 액세스 토큰·actor 복구 */
+export async function restoreOprSessionFromCookie(): Promise<boolean> {
+  if (typeof window === "undefined") return false;
+  return postOprRefresh();
+}
+
+export async function postOprLogout(): Promise<void> {
+  if (typeof window === "undefined") return;
+  try {
+    await fetch(apiUrl(PATH_AUTH_OPR_LOGOUT), {
+      method: "POST",
+      credentials: "include",
+    });
+  } catch {
+    /* 네트워크 실패해도 클라이언트 세션은 정리 */
+  }
+}
+
 export async function getHealth(): Promise<Record<string, unknown>> {
   return apiFetch<Record<string, unknown>>(PATH_HEALTH);
 }
@@ -92,4 +196,3 @@ export async function getHealth(): Promise<Record<string, unknown>> {
 export async function getApiTest(): Promise<unknown> {
   return apiFetch(PATH_API_TEST);
 }
-

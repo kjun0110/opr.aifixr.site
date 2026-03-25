@@ -20,3 +20,12 @@ export const PATH_API_TEST = "/api/test";
 /** 원청 이메일 로그인 (게이트웨이 JAR auth.opr) */
 export const PATH_AUTH_OPR_LOGIN = "/api/auth/opr/login";
 
+/** 리프레시 쿠키로 새 액세스 발급 */
+export const PATH_AUTH_OPR_REFRESH = "/api/auth/opr/refresh";
+
+/** 리프레시 세션 폐기 + 쿠키 삭제 */
+export const PATH_AUTH_OPR_LOGOUT = "/api/auth/opr/logout";
+
+/** 원청 Google OAuth 연동 시작 URL (Bearer 필요, 게이트웨이) */
+export const PATH_AUTH_OPR_GOOGLE_LINK_START = "/api/auth/opr/google/link/start";
+

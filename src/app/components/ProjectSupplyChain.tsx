@@ -294,6 +294,15 @@ const mockSupplyChain: SupplyChainNode = {
 };
 
 const LS_REGISTERED_TIER1_SUPPLIERS_KEY = 'aifix_mock_registered_tier1_suppliers_v1';
+type RegisteredTier1Supplier = {
+  id: string;
+  name: string;
+  nameEn: string;
+  supplierId: number;
+  projectId: number;
+  productId: number;
+  productVariantId: number;
+};
 
 export default function ProjectSupplyChain() {
   const { mode } = useMode();
@@ -973,23 +982,23 @@ export default function ProjectSupplyChain() {
     try {
       if (selected) {
         const prevRaw = localStorage.getItem(LS_REGISTERED_TIER1_SUPPLIERS_KEY);
-        const prev = (prevRaw ? JSON.parse(prevRaw) : []) as Array<{
-          id: string;
-          name: string;
-          nameEn: string;
-        }>;
-        const sid = String(selected.id);
-        const exists = prev.some((p) => p.id === sid);
-        const next = exists
-          ? prev
-          : [
-              ...prev,
-              {
-                id: sid,
-                name: selected.name,
-                nameEn: selected.code ?? '',
-              },
-            ];
+        const prev = (prevRaw ? JSON.parse(prevRaw) : []) as RegisteredTier1Supplier[];
+        const item: RegisteredTier1Supplier = {
+          id: `${nProj}:${rPg}:${nVariant}:${selected.id}`,
+          name: selected.name,
+          nameEn: selected.code ?? '',
+          supplierId: selected.id,
+          projectId: nProj,
+          productId: Number(rPg),
+          productVariantId: nVariant,
+        };
+        const exists = prev.some(
+          (p) =>
+            p.supplierId === item.supplierId &&
+            p.projectId === item.projectId &&
+            p.productVariantId === item.productVariantId,
+        );
+        const next = exists ? prev : [...prev, item];
         localStorage.setItem(LS_REGISTERED_TIER1_SUPPLIERS_KEY, JSON.stringify(next));
       }
     } catch {

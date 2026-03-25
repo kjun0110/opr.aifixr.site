@@ -1,12 +1,13 @@
 import {
-  ACCESS_TOKEN_STORAGE_KEY,
   AIFIXR_SESSION_UPDATED_EVENT,
-  OPR_DEPARTMENT_STORAGE_KEY,
-  REFRESH_TOKEN_STORAGE_KEY,
   actorStorageKey,
+  apiFetch,
   apiUrl,
+  OPR_DEPARTMENT_STORAGE_KEY,
+  postOprLogout,
 } from "./client";
-import { PATH_AUTH_OPR_LOGIN } from "./paths";
+import { setOprAccessToken } from "./sessionAccessToken";
+import { PATH_AUTH_OPR_GOOGLE_LINK_START, PATH_AUTH_OPR_LOGIN } from "./paths";
 
 export type OprLoginUser = {
   id: string;
@@ -18,7 +19,6 @@ export type OprLoginUser = {
 
 export type OprLoginResponse = {
   accessToken: string;
-  refreshToken: string;
   user: OprLoginUser;
 };
 
@@ -36,6 +36,7 @@ export async function loginOprAndStoreSession(
   const res = await fetch(apiUrl(PATH_AUTH_OPR_LOGIN), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    credentials: "include",
     body: JSON.stringify({ email: email.trim(), password }),
   });
 
@@ -50,8 +51,7 @@ export async function loginOprAndStoreSession(
 
   const data = (await res.json()) as OprLoginResponse;
   if (typeof window !== "undefined") {
-    localStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, data.accessToken);
-    localStorage.setItem(REFRESH_TOKEN_STORAGE_KEY, data.refreshToken);
+    setOprAccessToken(data.accessToken);
     localStorage.setItem(actorStorageKey(), data.user.id);
     const dept = data.user.department?.trim();
     if (dept) {
@@ -64,12 +64,32 @@ export async function loginOprAndStoreSession(
   return data;
 }
 
-export function clearOprSession(): void {
-  if (typeof window === "undefined") return;
-  localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
-  localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
-  localStorage.removeItem(actorStorageKey());
-  localStorage.removeItem(OPR_DEPARTMENT_STORAGE_KEY);
-  window.dispatchEvent(new Event(AIFIXR_SESSION_UPDATED_EVENT));
+/** DB 로그인 후 JWT로 Google 연동(동의) 화면으로 보낼 URL 조회 */
+export async function getOprGoogleLinkAuthUrl(): Promise<string> {
+  const data = await apiFetch<{ authUrl?: string; error?: string }>(
+    PATH_AUTH_OPR_GOOGLE_LINK_START,
+  );
+  if (data.error) {
+    throw new Error(data.error);
+  }
+  if (!data.authUrl) {
+    throw new Error("Google 연동 URL을 받지 못했습니다.");
+  }
+  return data.authUrl;
 }
 
+export async function clearOprSession(): Promise<void> {
+  if (typeof window === "undefined") return;
+  setOprAccessToken(null);
+  await postOprLogout();
+  localStorage.removeItem(actorStorageKey());
+  localStorage.removeItem(OPR_DEPARTMENT_STORAGE_KEY);
+  // 구버전 토큰 키 정리
+  try {
+    localStorage.removeItem("aifixr-access-token");
+    localStorage.removeItem("aifixr-refresh-token");
+  } catch {
+    /* ignore */
+  }
+  window.dispatchEvent(new Event(AIFIXR_SESSION_UPDATED_EVENT));
+}
