@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef } from 'react';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { restoreOprSessionFromCookie, AIFIXR_SESSION_UPDATED_EVENT } from '@/lib/api/client';
 
 /**
@@ -10,6 +10,7 @@ import { restoreOprSessionFromCookie, AIFIXR_SESSION_UPDATED_EVENT } from '@/lib
  */
 export default function OprSessionRestore() {
   const pathname = usePathname();
+  const router = useRouter();
   const ran = useRef(false);
 
   useEffect(() => {
@@ -22,9 +23,12 @@ export default function OprSessionRestore() {
     void restoreOprSessionFromCookie().then((ok) => {
       if (ok && typeof window !== 'undefined') {
         window.dispatchEvent(new Event(AIFIXR_SESSION_UPDATED_EVENT));
+      } else if (!ok && pathname.startsWith('/dashboard')) {
+        // 세션 복구 실패 시 로그인 페이지로 리다이렉트
+        router.push('/');
       }
     });
-  }, [pathname]);
+  }, [pathname, router]);
 
   return null;
 }

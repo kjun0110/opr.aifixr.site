@@ -5,6 +5,7 @@ import { Upload, Plus, FileText, Eye, Send, CheckCircle, Clock, AlertCircle, Che
 import { toast } from 'sonner';
 import { useMode } from '../context/ModeContext';
 import { getInvitationHistory, postOprInvitation, type InvitationHistoryItem } from '@/lib/api/invitation';
+import { apiFetch } from '@/lib/api/client';
 
 type Recipient = { company: string; email: string; contactName: string; scopeId?: string };
 type Tier1Supplier = {
@@ -149,12 +150,11 @@ function RecipientCard({
 export default function Invite() {
   const { mode } = useMode();
 
-  const LS_REGISTERED_TIER1_SUPPLIERS_KEY = 'aifix_mock_registered_tier1_suppliers_v1';
-
   const [recipients, setRecipients] = useState<Array<Recipient>>([
     { company: '', email: '', contactName: '' },
   ]);
   const [eligibleTier1Suppliers, setEligibleTier1Suppliers] = useState<Array<Tier1Supplier>>([]);
+  const [loadingSuppliers, setLoadingSuppliers] = useState(false);
   const [subject, setSubject] = useState('[AIFIX] 공급망 관리 시스템 회원가입 안내');
   const [body, setBody] = useState(`안녕하세요,
 
@@ -186,48 +186,85 @@ https://aifix.com/signup
   const csvInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
-    // "프로젝트 / 공급망 관리"에서 1차 협력사로 등록된 목록만 초대에서 선택할 수 있습니다.
-    try {
-      const raw = localStorage.getItem(LS_REGISTERED_TIER1_SUPPLIERS_KEY);
-      const parsed = raw ? (JSON.parse(raw) as Array<Record<string, unknown>>) : [];
-      const normalized: Tier1Supplier[] = parsed
-        .map((it, idx) => ({
-          id: String(it.id ?? `${idx}`),
-          name: String(it.name ?? ''),
-          nameEn: typeof it.nameEn === 'string' ? it.nameEn : undefined,
-          supplierId: typeof it.supplierId === 'number' ? it.supplierId : undefined,
-          projectId: typeof it.projectId === 'number' ? it.projectId : undefined,
-          productId: typeof it.productId === 'number' ? it.productId : undefined,
-          productVariantId:
-            typeof it.productVariantId === 'number' ? it.productVariantId : undefined,
-        }))
-        .filter((it) => it.name.trim().length > 0);
-      setEligibleTier1Suppliers(normalized);
-      // 초대 페이지 진입 시 최근 이력 조회
-      void getInvitationHistory({ limit: 50 })
-        .then((rows) => {
-          const mapped = rows.map((r: InvitationHistoryItem) => ({
-            company: r.invitee_company_hint || '-',
-            email: r.invitee_email || '-',
-            sentDate: new Date(r.created_at).toLocaleString(),
-            version: 'v2.0',
-            status: r.status === 'failed' ? 'failed' : 'sent',
-            opened: r.status === 'in_progress' || r.status === 'completed',
-            projectAccess:
-              r.status === 'completed'
-                ? 'approved'
-                : r.status === 'rejected'
-                  ? 'rejected'
-                  : 'pending',
-          }));
-          setSentHistory(mapped);
-        })
-        .catch(() => {
-          // 이력 API 실패 시 기존 mock 표시 유지
-        });
-    } catch {
-      setEligibleTier1Suppliers([]);
-    }
+    // DB에서 등록된 1차 협력사 목록 가져오기
+    const loadTier1Suppliers = async () => {
+      setLoadingSuppliers(true);
+      try {
+        const customers = await apiFetch<any[]>('/api/supply-chain/project-supply-chain/customers');
+        
+        const allTier1: Tier1Supplier[] = [];
+        
+        for (const customer of customers) {
+          const branches = await apiFetch<any[]>(`/api/supply-chain/project-supply-chain/customers/${customer.id}/branches`);
+          
+          for (const branch of branches) {
+            const project = await apiFetch<any>(`/api/supply-chain/project-supply-chain/branches/${branch.id}/project`);
+            const products = await apiFetch<any[]>(`/api/supply-chain/project-supply-chain/projects/${project.id}/products`);
+            
+            for (const product of products) {
+              const variants = await apiFetch<any[]>(`/api/supply-chain/project-supply-chain/projects/${project.id}/products/${product.id}/product-variants`);
+              
+              for (const variant of variants) {
+                const nodes = await apiFetch<any[]>(`/api/supply-chain/project-supply-chain/projects/${project.id}/product-variants/${variant.id}/nodes`);
+                
+                const tier1Nodes = nodes.filter((n: any) => 
+                  (n.tier === 1 || (n.tier === null && n.status === 'added'))
+                );
+                
+                for (const node of tier1Nodes) {
+                  const compositeId = `${project.id}:${product.id}:${variant.id}:${node.supplier_id}`;
+                  if (!allTier1.some(t => t.id === compositeId)) {
+                    allTier1.push({
+                      id: compositeId,
+                      name: node.supplier_name,
+                      nameEn: node.supplier_code || undefined,
+                      supplierId: node.supplier_id,
+                      projectId: project.id,
+                      productId: product.id,
+                      productVariantId: variant.id,
+                    });
+                  }
+                }
+              }
+            }
+          }
+        }
+        
+        setEligibleTier1Suppliers(allTier1);
+      } catch (error) {
+        console.error('1차 협력사 목록 로드 실패:', error);
+        toast.error('1차 협력사 목록을 불러오는데 실패했습니다');
+      } finally {
+        setLoadingSuppliers(false);
+      }
+    };
+
+    void loadTier1Suppliers();
+
+    // 초대 페이지 진입 시 최근 이력 조회
+    void getInvitationHistory({ limit: 50 })
+      .then((rows) => {
+        const mapped = rows.map((r: InvitationHistoryItem) => ({
+          company: r.invitee_company_hint || '-',
+          email: r.invitee_email || '-',
+          sentDate: new Date(r.created_at).toLocaleString(),
+          version: 'v2.0',
+          status: r.status === 'failed' ? 'failed' : 'sent',
+          opened: r.status === 'in_progress' || r.status === 'completed',
+          projectAccess:
+            r.status === 'completed'
+              ? 'approved'
+              : r.status === 'revoked'
+                ? 'rejected'
+                : r.status === 'in_progress'
+                  ? 'pending'
+                  : 'waiting',
+        }));
+        setSentHistory(mapped);
+      })
+      .catch(() => {
+        // 이력 API 실패 시 기존 mock 표시 유지
+      });
   }, []);
 
   const supplierEmailById = useMemo(() => {
@@ -328,9 +365,11 @@ https://aifix.com/signup
           projectAccess:
             r.status === 'completed'
               ? 'approved'
-              : r.status === 'rejected'
+              : r.status === 'revoked'
                 ? 'rejected'
-                : 'pending',
+                : r.status === 'in_progress'
+                  ? 'pending'
+                  : 'waiting',
         }));
         setSentHistory(mapped);
       } catch {
@@ -493,7 +532,14 @@ https://aifix.com/signup
         );
       case 'pending':
         return (
-          <span className="flex items-center gap-1 px-2 py-1 bg-yellow-100 text-yellow-700 rounded-md text-xs font-medium">
+          <span className="flex items-center gap-1 px-2 py-1 bg-orange-100 text-orange-700 rounded-md text-xs font-medium">
+            <Clock className="w-3 h-3" />
+            승인대기
+          </span>
+        );
+      case 'waiting':
+        return (
+          <span className="flex items-center gap-1 px-2 py-1 bg-gray-100 text-gray-600 rounded-md text-xs font-medium">
             <Clock className="w-3 h-3" />
             진입대기
           </span>
