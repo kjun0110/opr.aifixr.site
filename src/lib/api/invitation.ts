@@ -45,6 +45,7 @@ export type InvitationHistoryItem = {
   sent_at?: string | null;
   expires_at?: string | null;
   created_at: string;
+  last_signup_request_id?: number | null;
 };
 
 export async function postOprInvitation(

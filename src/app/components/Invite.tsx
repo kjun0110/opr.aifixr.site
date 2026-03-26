@@ -6,6 +6,7 @@ import { toast } from 'sonner';
 import { useMode } from '../context/ModeContext';
 import { getInvitationHistory, postOprInvitation, type InvitationHistoryItem } from '@/lib/api/invitation';
 import { apiFetch } from '@/lib/api/client';
+import { approveSignupRequest, rejectSignupRequest } from '@/lib/api/iam';
 
 type Recipient = { company: string; email: string; contactName: string; scopeId?: string };
 type Tier1Supplier = {
@@ -244,6 +245,7 @@ https://aifix.com/signup
     // 초대 페이지 진입 시 최근 이력 조회
     void getInvitationHistory({ limit: 50 })
       .then((rows) => {
+        console.log('초대 히스토리 API 응답:', rows);
         const mapped = rows.map((r: InvitationHistoryItem) => ({
           company: r.invitee_company_hint || '-',
           email: r.invitee_email || '-',
@@ -259,10 +261,13 @@ https://aifix.com/signup
                 : r.status === 'in_progress'
                   ? 'pending'
                   : 'waiting',
+          signupRequestId: r.last_signup_request_id,
         }));
+        console.log('매핑된 히스토리:', mapped);
         setSentHistory(mapped);
       })
-      .catch(() => {
+      .catch((error) => {
+        console.error('초대 히스토리 조회 실패:', error);
         // 이력 API 실패 시 기존 mock 표시 유지
       });
   }, []);
@@ -500,18 +505,42 @@ https://aifix.com/signup
     return '전송완료';
   };
 
-  const handleApprove = (index: number) => {
-    const updatedHistory = [...sentHistory];
-    updatedHistory[index].projectAccess = 'approved';
-    setSentHistory(updatedHistory);
-    toast.success(`${updatedHistory[index].company}의 프로젝트 진입을 승인했습니다`);
+  const handleApprove = async (index: number) => {
+    const item = sentHistory[index];
+    if (!item.signupRequestId) {
+      toast.error('가입 신청 ID가 없습니다');
+      return;
+    }
+    
+    try {
+      await approveSignupRequest(item.signupRequestId);
+      const updatedHistory = [...sentHistory];
+      updatedHistory[index].projectAccess = 'approved';
+      setSentHistory(updatedHistory);
+      toast.success(`${item.company}의 프로젝트 진입을 승인했습니다`);
+    } catch (error) {
+      console.error('승인 실패:', error);
+      toast.error('승인 처리에 실패했습니다');
+    }
   };
 
-  const handleReject = (index: number) => {
-    const updatedHistory = [...sentHistory];
-    updatedHistory[index].projectAccess = 'rejected';
-    setSentHistory(updatedHistory);
-    toast.error(`${updatedHistory[index].company}의 프로젝트 진입을 반려했습니다`);
+  const handleReject = async (index: number) => {
+    const item = sentHistory[index];
+    if (!item.signupRequestId) {
+      toast.error('가입 신청 ID가 없습니다');
+      return;
+    }
+    
+    try {
+      await rejectSignupRequest(item.signupRequestId, '원청 담당자가 반려했습니다');
+      const updatedHistory = [...sentHistory];
+      updatedHistory[index].projectAccess = 'rejected';
+      setSentHistory(updatedHistory);
+      toast.error(`${item.company}의 프로젝트 진입을 반려했습니다`);
+    } catch (error) {
+      console.error('반려 실패:', error);
+      toast.error('반려 처리에 실패했습니다');
+    }
   };
 
   const getProjectAccessBadge = (projectAccess: string) => {
