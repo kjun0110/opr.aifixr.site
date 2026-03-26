@@ -222,8 +222,9 @@ https://aifix.com/signup
                 );
                 
                 for (const node of tier1Nodes) {
-                  const compositeId = `${project.id}:${product.id}:${variant.id}:${node.supplier_id}`;
-                  if (!allTier1.some(t => t.id === compositeId)) {
+                  // supplier_id로 중복 체크 (같은 협력사가 여러 프로젝트/제품에 있어도 한 번만 표시)
+                  if (!allTier1.some(t => t.supplierId === node.supplier_id)) {
+                    const compositeId = `${project.id}:${product.id}:${variant.id}:${node.supplier_id}`;
                     allTier1.push({
                       id: compositeId,
                       name: node.supplier_name,

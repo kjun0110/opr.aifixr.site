@@ -22,7 +22,7 @@ export async function rejectSignupRequest(
 ): Promise<void> {
   await apiFetch(`${IAM_BASE}/signup-requests/${signupRequestId}/reject`, {
     method: "POST",
-    body: JSON.stringify({ reason }),
+    json: { reason },
   });
 }
 
