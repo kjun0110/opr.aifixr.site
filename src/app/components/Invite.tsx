@@ -196,65 +196,143 @@ https://aifix.com/signup
   const csvInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
-    // DB에서 등록된 1차 협력사 목록 가져오기
+    let mounted = true;
+    let loadAttempted = false;
+    
+    // DB에서 등록된 1차 협력사 목록 가져오기 (병렬 최적화)
     const loadTier1Suppliers = async () => {
+      if (loadAttempted) return;
+      loadAttempted = true;
+      
       setLoadingSuppliers(true);
       try {
         const customers = await apiFetch<any[]>('/api/supply-chain/project-supply-chain/customers');
         
+        // 모든 고객사의 지사를 병렬로 가져오기
+        const allBranchesPromises = customers.map(async (customer) => {
+          try {
+            const branches = await apiFetch<any[]>(`/api/supply-chain/project-supply-chain/customers/${customer.id}/branches`);
+            return branches.map(b => ({ customer, branch: b }));
+          } catch {
+            return [];
+          }
+        });
+        const allBranchesNested = await Promise.all(allBranchesPromises);
+        const allBranches = allBranchesNested.flat();
+        
+        // 모든 지사의 프로젝트를 병렬로 가져오기
+        const allProjectsPromises = allBranches.map(async ({ customer, branch }) => {
+          try {
+            const project = await apiFetch<any>(`/api/supply-chain/project-supply-chain/branches/${branch.id}/project`);
+            return { customer, branch, project };
+          } catch {
+            return null;
+          }
+        });
+        const allProjectsResults = await Promise.all(allProjectsPromises);
+        const allProjects = allProjectsResults.filter((x): x is NonNullable<typeof x> => x !== null);
+        
+        // 모든 프로젝트의 제품을 병렬로 가져오기
+        const allProductsPromises = allProjects.map(async ({ customer, branch, project }) => {
+          try {
+            const products = await apiFetch<any[]>(`/api/supply-chain/project-supply-chain/projects/${project.id}/products`);
+            return products.map(prod => ({ customer, branch, project, product: prod }));
+          } catch {
+            return [];
+          }
+        });
+        const allProductsNested = await Promise.all(allProductsPromises);
+        const allProductsFlat = allProductsNested.flat();
+        
+        // 모든 제품의 변형을 병렬로 가져오기
+        const allVariantsPromises = allProductsFlat.map(async (item) => {
+          try {
+            const variants = await apiFetch<any[]>(`/api/supply-chain/project-supply-chain/projects/${item.project.id}/products/${item.product.id}/product-variants`);
+            return variants.map(v => ({ ...item, variant: v }));
+          } catch {
+            return [];
+          }
+        });
+        const allVariantsNested = await Promise.all(allVariantsPromises);
+        const allVariants = allVariantsNested.flat();
+        
+        // 모든 변형의 노드를 병렬로 가져오기
+        const allNodesPromises = allVariants.map(async (item) => {
+          try {
+            const nodes = await apiFetch<any[]>(`/api/supply-chain/project-supply-chain/projects/${item.project.id}/product-variants/${item.variant.id}/nodes`);
+            const tier1Nodes = nodes.filter((n: any) => 
+              (n.tier === 1 || (n.tier === null && n.status === 'added'))
+            );
+            return tier1Nodes.map(node => ({ ...item, node }));
+          } catch {
+            return [];
+          }
+        });
+        const allNodesNested = await Promise.all(allNodesPromises);
+        const allNodes = allNodesNested.flat();
+        
+        // 중복 제거 및 Code 우선 선택
         const allTier1: Tier1Supplier[] = [];
         
-        for (const customer of customers) {
-          const branches = await apiFetch<any[]>(`/api/supply-chain/project-supply-chain/customers/${customer.id}/branches`);
-          
-          for (const branch of branches) {
-            const project = await apiFetch<any>(`/api/supply-chain/project-supply-chain/branches/${branch.id}/project`);
-            const products = await apiFetch<any[]>(`/api/supply-chain/project-supply-chain/projects/${project.id}/products`);
+        for (const item of allNodes) {
+          const node = item.node;
+          const normalizedName = node.supplier_name?.trim().toLowerCase();
+          if (normalizedName) {
+            const existingIndex = allTier1.findIndex(t => t.name.trim().toLowerCase() === normalizedName);
             
-            for (const product of products) {
-              const variants = await apiFetch<any[]>(`/api/supply-chain/project-supply-chain/projects/${project.id}/products/${product.id}/product-variants`);
+            if (existingIndex === -1) {
+              // 새로운 회사명이면 추가
+              const compositeId = `${item.project.id}:${item.product.id}:${item.variant.id}:${node.supplier_id}`;
+              allTier1.push({
+                id: compositeId,
+                name: node.supplier_name,
+                nameEn: node.supplier_code || undefined,
+                supplierId: node.supplier_id,
+                projectId: item.project.id,
+                productId: item.product.id,
+                productVariantId: item.variant.id,
+              });
+            } else {
+              // 이미 존재하는 회사명이면, Code가 있는 것으로 교체
+              const existing = allTier1[existingIndex];
+              const hasCode = node.supplier_code && node.supplier_code.trim();
+              const existingHasCode = existing.nameEn && existing.nameEn.trim();
               
-              for (const variant of variants) {
-                const nodes = await apiFetch<any[]>(`/api/supply-chain/project-supply-chain/projects/${project.id}/product-variants/${variant.id}/nodes`);
-                
-                const tier1Nodes = nodes.filter((n: any) => 
-                  (n.tier === 1 || (n.tier === null && n.status === 'added'))
-                );
-                
-                for (const node of tier1Nodes) {
-                  // supplier_id로 중복 체크 (같은 협력사가 여러 프로젝트/제품에 있어도 한 번만 표시)
-                  if (!allTier1.some(t => t.supplierId === node.supplier_id)) {
-                    const compositeId = `${project.id}:${product.id}:${variant.id}:${node.supplier_id}`;
-                    allTier1.push({
-                      id: compositeId,
-                      name: node.supplier_name,
-                      nameEn: node.supplier_code || undefined,
-                      supplierId: node.supplier_id,
-                      projectId: project.id,
-                      productId: product.id,
-                      productVariantId: variant.id,
-                    });
-                  }
-                }
+              if (hasCode && !existingHasCode) {
+                // 새로운 노드에 Code가 있고 기존 것에는 없으면 교체
+                const compositeId = `${item.project.id}:${item.product.id}:${item.variant.id}:${node.supplier_id}`;
+                allTier1[existingIndex] = {
+                  id: compositeId,
+                  name: node.supplier_name,
+                  nameEn: node.supplier_code || undefined,
+                  supplierId: node.supplier_id,
+                  projectId: item.project.id,
+                  productId: item.product.id,
+                  productVariantId: item.variant.id,
+                };
               }
             }
           }
         }
         
-        setEligibleTier1Suppliers(allTier1);
+        if (mounted) {
+          setEligibleTier1Suppliers(allTier1);
+        }
       } catch (error) {
         console.error('1차 협력사 목록 로드 실패:', error);
-        toast.error('1차 협력사 목록을 불러오는데 실패했습니다');
+        if (mounted) {
+          toast.error('1차 협력사 목록을 불러오는데 실패했습니다');
+        }
       } finally {
-        setLoadingSuppliers(false);
+        if (mounted) {
+          setLoadingSuppliers(false);
+        }
       }
     };
 
-    void loadTier1Suppliers();
-
-    // 초대 페이지 진입 시 최근 이력 조회
-    void getInvitationHistory({ limit: 50 })
-      .then((rows) => {
+    const loadHistory = async () => {
+      try {
+        const rows = await getInvitationHistory({ limit: 50 });
         console.log('초대 히스토리 API 응답:', rows);
         const mapped = rows.map((r: InvitationHistoryItem) => ({
           company: r.invitee_company_hint || '-',
@@ -274,12 +352,38 @@ https://aifix.com/signup
           signupRequestId: r.last_signup_request_id ?? undefined,
         }));
         console.log('매핑된 히스토리:', mapped);
-        setSentHistory(mapped);
-      })
-      .catch((error) => {
+        if (mounted) {
+          setSentHistory(mapped);
+        }
+      } catch (error) {
         console.error('초대 히스토리 조회 실패:', error);
-        // 이력 API 실패 시 기존 mock 표시 유지
-      });
+      }
+    };
+    
+    // 세션 복원 대기 후 로드
+    const timer = setTimeout(() => {
+      void loadTier1Suppliers();
+      void loadHistory();
+    }, 500);
+    
+    // 세션 업데이트 이벤트 리스너
+    const handleSessionUpdate = () => {
+      clearTimeout(timer);
+      void loadTier1Suppliers();
+      void loadHistory();
+    };
+    
+    if (typeof window !== 'undefined') {
+      window.addEventListener('aifixr-session-updated', handleSessionUpdate);
+    }
+    
+    return () => {
+      mounted = false;
+      clearTimeout(timer);
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('aifixr-session-updated', handleSessionUpdate);
+      }
+    };
   }, []);
 
   const supplierEmailById = useMemo(() => {

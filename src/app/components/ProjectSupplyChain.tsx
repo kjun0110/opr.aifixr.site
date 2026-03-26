@@ -455,7 +455,12 @@ export default function ProjectSupplyChain() {
 
   useEffect(() => {
     let mounted = true;
+    let loadAttempted = false;
+    
     const load = async () => {
+      if (loadAttempted) return;
+      loadAttempted = true;
+      
       try {
         const customersRes = await apiFetch<ApiCustomer[]>(
           `${SUPPLY_CHAIN_BASE}/project-supply-chain/customers`
@@ -463,71 +468,124 @@ export default function ProjectSupplyChain() {
         if (mounted) {
           setApiCustomers(customersRes);
         }
-        const projectsByCustomer = await Promise.all(
-          customersRes.map(async (c) => {
+        
+        // 모든 고객사의 모든 지사를 병렬로 가져오기
+        const allBranchesPromises = customersRes.map(async (c) => {
+          try {
             const branchesRes = await apiFetch<ApiBranch[]>(
               `${SUPPLY_CHAIN_BASE}/project-supply-chain/customers/${c.id}/branches`
             );
-            return Promise.all(
-              branchesRes.map(async (b) => {
-                const p = await apiFetch<ApiProject>(
-                  `${SUPPLY_CHAIN_BASE}/project-supply-chain/branches/${b.id}/project`
-                );
-                const products = await apiFetch<ApiProduct[]>(
-                  `${SUPPLY_CHAIN_BASE}/project-supply-chain/projects/${p.id}/products`
-                );
-
-                const productGroups = await Promise.all(
-                  products.map(async (pr): Promise<ProductGroup> => {
-                    const variants = await apiFetch<ApiProductVariant[]>(
-                      `${SUPPLY_CHAIN_BASE}/project-supply-chain/projects/${p.id}/products/${pr.id}/product-variants`
-                    );
-                    const detailProducts = await Promise.all(
-                      variants.map(async (v): Promise<DetailProduct> => {
-                        let bomCode = '';
-                        try {
-                          const bom = await apiFetch<ApiBom>(
-                            `${SUPPLY_CHAIN_BASE}/project-supply-chain/projects/${p.id}/product-variants/${v.id}/bom`
-                          );
-                          bomCode = bom.code ?? '';
-                        } catch {
-                          bomCode = '';
-                        }
-                        return {
-                          id: String(v.id),
-                          displayName: v.name,
-                          productItemCode: v.code ?? v.name,
-                          bomCode: bomCode || '-',
-                          suppliers: [],
-                        };
-                      })
-                    );
-
-                    return {
-                      id: String(pr.id),
-                      name: pr.name,
-                      productCode: pr.code,
-                      detailProducts,
-                    };
-                  })
-                );
-
-                return {
-                  id: String(p.id),
-                  projectCode: p.code,
-                  customerId: String(c.id),
-                  customerName: c.name,
-                  branchId: String(b.id),
-                  branchName: b.name,
-                  period: `${p.start_date} ~ ${p.end_date}`,
-                  projectName: p.name,
-                  productGroups,
-                } satisfies Project;
-              })
+            return branchesRes.map(b => ({ customer: c, branch: b }));
+          } catch {
+            return [];
+          }
+        });
+        
+        const allBranchesNested = await Promise.all(allBranchesPromises);
+        const allBranches = allBranchesNested.flat();
+        
+        // 모든 지사의 프로젝트를 병렬로 가져오기
+        const allProjectsPromises = allBranches.map(async ({ customer, branch }) => {
+          try {
+            const p = await apiFetch<ApiProject>(
+              `${SUPPLY_CHAIN_BASE}/project-supply-chain/branches/${branch.id}/project`
             );
-          })
-        );
-        const projects: Project[] = projectsByCustomer.flat();
+            return { customer, branch, project: p };
+          } catch {
+            return null;
+          }
+        });
+        
+        const allProjectsResults = await Promise.all(allProjectsPromises);
+        const allProjects = allProjectsResults.filter((x): x is NonNullable<typeof x> => x !== null);
+        
+        // 모든 프로젝트의 제품을 병렬로 가져오기
+        const allProductsPromises = allProjects.map(async ({ customer, branch, project }) => {
+          try {
+            const products = await apiFetch<ApiProduct[]>(
+              `${SUPPLY_CHAIN_BASE}/project-supply-chain/projects/${project.id}/products`
+            );
+            return products.map(prod => ({ customer, branch, project, product: prod }));
+          } catch {
+            return [];
+          }
+        });
+        
+        const allProductsNested = await Promise.all(allProductsPromises);
+        const allProductsFlat = allProductsNested.flat();
+        
+        // 모든 제품의 변형을 병렬로 가져오기
+        const allVariantsPromises = allProductsFlat.map(async (item) => {
+          try {
+            const variants = await apiFetch<ApiProductVariant[]>(
+              `${SUPPLY_CHAIN_BASE}/project-supply-chain/projects/${item.project.id}/products/${item.product.id}/product-variants`
+            );
+            return variants.map(v => ({ ...item, variant: v }));
+          } catch {
+            return [];
+          }
+        });
+        
+        const allVariantsNested = await Promise.all(allVariantsPromises);
+        const allVariants = allVariantsNested.flat();
+        
+        // 모든 변형의 BOM을 병렬로 가져오기
+        const allBomsPromises = allVariants.map(async (item) => {
+          try {
+            const bom = await apiFetch<ApiBom>(
+              `${SUPPLY_CHAIN_BASE}/project-supply-chain/projects/${item.project.id}/product-variants/${item.variant.id}/bom`
+            );
+            return { ...item, bomCode: bom.code ?? '' };
+          } catch {
+            return { ...item, bomCode: '' };
+          }
+        });
+        
+        const allBomsResults = await Promise.all(allBomsPromises);
+        
+        // 데이터 재구성
+        const projectsMap = new Map<string, Project>();
+        
+        for (const item of allBomsResults) {
+          const projectKey = `${item.customer.id}-${item.branch.id}-${item.project.id}`;
+          
+          if (!projectsMap.has(projectKey)) {
+            projectsMap.set(projectKey, {
+              id: String(item.project.id),
+              projectCode: item.project.code,
+              customerId: String(item.customer.id),
+              customerName: item.customer.name,
+              branchId: String(item.branch.id),
+              branchName: item.branch.name,
+              period: `${item.project.start_date} ~ ${item.project.end_date}`,
+              projectName: item.project.name,
+              productGroups: [],
+            });
+          }
+          
+          const project = projectsMap.get(projectKey)!;
+          let productGroup = project.productGroups.find(pg => pg.id === String(item.product.id));
+          
+          if (!productGroup) {
+            productGroup = {
+              id: String(item.product.id),
+              name: item.product.name,
+              productCode: item.product.code,
+              detailProducts: [],
+            };
+            project.productGroups.push(productGroup);
+          }
+          
+          productGroup.detailProducts.push({
+            id: String(item.variant.id),
+            displayName: item.variant.name,
+            productItemCode: item.variant.code ?? item.variant.name,
+            bomCode: item.bomCode || '-',
+            suppliers: [],
+          });
+        }
+        
+        const projects: Project[] = Array.from(projectsMap.values());
 
         if (mounted) {
           setApiProjects(projects);
@@ -544,9 +602,28 @@ export default function ProjectSupplyChain() {
         }
       }
     };
-    void load();
+    
+    // 세션 복원 대기 후 로드
+    const timer = setTimeout(() => {
+      void load();
+    }, 500);
+    
+    // 세션 업데이트 이벤트 리스너
+    const handleSessionUpdate = () => {
+      clearTimeout(timer);
+      void load();
+    };
+    
+    if (typeof window !== 'undefined') {
+      window.addEventListener('aifixr-session-updated', handleSessionUpdate);
+    }
+    
     return () => {
       mounted = false;
+      clearTimeout(timer);
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('aifixr-session-updated', handleSessionUpdate);
+      }
     };
   }, []);
 
