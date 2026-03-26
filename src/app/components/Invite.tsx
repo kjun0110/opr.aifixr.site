@@ -270,7 +270,7 @@ https://aifix.com/signup
                 : r.status === 'in_progress'
                   ? 'pending'
                   : 'waiting',
-          signupRequestId: r.last_signup_request_id,
+          signupRequestId: r.last_signup_request_id ?? undefined,
         }));
         console.log('매핑된 히스토리:', mapped);
         setSentHistory(mapped);
