@@ -450,6 +450,11 @@ https://aifix.com/signup
 
     let success = 0;
     const failMessages: string[] = [];
+    
+    // 백엔드 전달용: 화면의 모든 URL을 {link} 플레이스홀더로 변환
+    // 단어 경계까지 포함하여 URL 전체를 찾기
+    const bodyForBackend = body.trim().replace(/https?:\/\/[^\s]+/g, '{link}');
+    
     for (const r of nonEmptyCards) {
       const matched = normalizeTier1Company(r.company, r.scopeId);
       if (!matched?.supplierId || !matched.productVariantId) continue;
@@ -463,6 +468,8 @@ https://aifix.com/signup
             email: r.email.trim(),
           },
           expire_days: 3,
+          email_subject: subject.trim(),
+          email_body: bodyForBackend,
         });
         success += 1;
       } catch (e) {

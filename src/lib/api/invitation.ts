@@ -20,6 +20,8 @@ export type OprInvitePayload = {
     email: string;
   };
   expire_days?: number;
+  email_subject?: string;
+  email_body?: string;
 };
 
 export type InvitationCreatedItem = {
