@@ -175,7 +175,16 @@ https://aifix.com/signup
     { value: 'v2.0 (2026.01)', label: 'v2.0 (2026.01)' },
   ];
 
-  const [sentHistory, setSentHistory] = useState([
+  const [sentHistory, setSentHistory] = useState<Array<{
+    company: string;
+    email: string;
+    sentDate: string;
+    version: string;
+    status: string;
+    opened: boolean;
+    projectAccess: string;
+    signupRequestId?: number;
+  }>>([
     { company: '(주)테크노소재', email: 'contact@techno.com', sentDate: '2026.02.28 14:30', version: 'v2.0', status: 'opened', opened: true, projectAccess: 'approved' },
     { company: '글로벌파트너스', email: 'info@global.com', sentDate: '2026.02.27 11:20', version: 'v2.0', status: 'sent', opened: false, projectAccess: 'pending' },
     { company: '신소재산업(주)', email: 'admin@newmat.com', sentDate: '2026.02.26 16:45', version: 'v2.0', status: 'opened', opened: true, projectAccess: 'pending' },
