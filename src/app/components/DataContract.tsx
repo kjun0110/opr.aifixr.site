@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   FileText,
   Download,
@@ -23,17 +23,30 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 
-interface ConsentVersion {
-  id: string;
-  version: string;
-  status: 'Draft' | 'Review' | 'Approved' | 'Active' | 'Retired';
-  startDate: string;
-  endDate?: string;
-  fileName: string;
-  uploadDate: string;
-  changeSummary: string;
-  department: string;
-  approver: string;
+import type { ContractRevisionListItem, ContractRevisionCurrentResponse } from '@/lib/api/data-contract';
+import {
+  displayVersionCode,
+  downloadContractRevisionPdf,
+  fetchContractRevisionPdfBlob,
+  getContractRevisionStatusCounts,
+  getCurrentContractRevision,
+  listContractRevisions,
+} from '@/lib/api/data-contract';
+
+function mapApiRevisionStatus(
+  s: string,
+): 'Draft' | 'Review' | 'Approved' | 'Active' | 'Retired' {
+  const k = s.toLowerCase();
+  if (k === 'draft') return 'Draft';
+  if (k === 'review') return 'Review';
+  if (k === 'approved') return 'Approved';
+  if (k === 'active') return 'Active';
+  if (k === 'retired') return 'Retired';
+  return 'Draft';
+}
+
+function formatDateYmd(iso: string): string {
+  return iso.slice(0, 10);
 }
 
 interface ConsentItem {
@@ -60,7 +73,25 @@ interface SupplierConsent {
 
 export default function DataContract() {
   const [activeTab, setActiveTab] = useState<'items' | 'status'>('items');
-  const [selectedVersion, setSelectedVersion] = useState<string | null>('3P-2026-03');
+  const [revisions, setRevisions] = useState<ContractRevisionListItem[]>([]);
+  const [currentRevision, setCurrentRevision] = useState<ContractRevisionCurrentResponse | null>(null);
+  const [statusCountsApi, setStatusCountsApi] = useState<{
+    draft: number;
+    review: number;
+    approved: number;
+    active: number;
+    retired: number;
+  } | null>(null);
+  const [selectedRevisionId, setSelectedRevisionId] = useState<number | null>(null);
+  /** 목록 API만 — PDF(수십 MB)와 무관하게 빨리 끝냄 */
+  const [revisionsLoading, setRevisionsLoading] = useState(true);
+  const [listError, setListError] = useState<string | null>(null);
+  /** 실제로 iframe에 올릴 PDF만 이 id일 때 네트워크 로드 (선택만으로는 로드 안 함) */
+  const [previewTargetId, setPreviewTargetId] = useState<number | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+
   const [showRequestModal, setShowRequestModal] = useState(false);
   const [showLogDrawer, setShowLogDrawer] = useState(false);
   const [selectedSupplier, setSelectedSupplier] = useState<string | null>(null);
@@ -70,45 +101,119 @@ export default function DataContract() {
   const [filterStatus, setFilterStatus] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Mock data
-  const currentVersion: ConsentVersion = {
-    id: '1',
-    version: '3P-2026-03',
-    status: 'Active',
-    startDate: '2026-03-01',
-    fileName: '3p-consent-v2.pdf',
-    uploadDate: '2026-02-25',
-    changeSummary: 'GDPR 준수 조항 추가, 제3자 제공 범위 명확화',
-    department: '법무팀',
-    approver: '김법무',
-  };
+  useEffect(() => {
+    let cancelled = false;
+    setRevisionsLoading(true);
+    setListError(null);
 
-  const versions: ConsentVersion[] = [
-    currentVersion,
-    {
-      id: '2',
-      version: '3P-2026-02',
-      status: 'Retired',
-      startDate: '2026-01-01',
-      endDate: '2026-02-28',
-      fileName: '3p-consent-v1.pdf',
-      uploadDate: '2025-12-20',
-      changeSummary: '초기 버전',
-      department: '법무팀',
-      approver: '이관리',
-    },
-    {
-      id: '3',
-      version: '3P-2026-04',
-      status: 'Review',
-      startDate: '2026-04-01',
-      fileName: '3p-consent-v3-draft.pdf',
-      uploadDate: '2026-03-02',
-      changeSummary: '개인정보 보호법 개정 반영',
-      department: '법무팀',
-      approver: '김법무',
-    },
-  ];
+    listContractRevisions({ limit: 50 })
+      .then((list) => {
+        if (cancelled) return;
+        setRevisions(list);
+        const sel =
+          list.find((r) => r.is_current)?.id ?? list[0]?.id ?? null;
+        setSelectedRevisionId(sel);
+        setPreviewTargetId(null);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setListError(e instanceof Error ? e.message : '목록을 불러오지 못했습니다.');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setRevisionsLoading(false);
+      });
+
+    getCurrentContractRevision()
+      .then((c) => {
+        if (!cancelled) setCurrentRevision(c);
+      })
+      .catch(() => {
+        if (!cancelled) setCurrentRevision(null);
+      });
+
+    getContractRevisionStatusCounts()
+      .then((c) => {
+        if (!cancelled) setStatusCountsApi(c);
+      })
+      .catch(() => {
+        if (!cancelled) setStatusCountsApi(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (previewTargetId == null) {
+      setPreviewUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return null;
+      });
+      setPreviewLoading(false);
+      setPreviewError(null);
+      return;
+    }
+    let objectUrl: string | null = null;
+    let alive = true;
+    setPreviewLoading(true);
+    setPreviewError(null);
+    setPreviewUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return null;
+    });
+
+    fetchContractRevisionPdfBlob(previewTargetId)
+      .then((blob) => {
+        if (!alive) return;
+        objectUrl = URL.createObjectURL(blob);
+        setPreviewUrl(objectUrl);
+      })
+      .catch((err) => {
+        if (!alive) return;
+        const msg = err instanceof Error ? err.message : 'PDF를 불러오지 못했습니다.';
+        setPreviewError(msg);
+        toast.error('PDF 미리보기를 불러오지 못했습니다.');
+      })
+      .finally(() => {
+        if (alive) setPreviewLoading(false);
+      });
+
+    return () => {
+      alive = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [previewTargetId]);
+
+  const selectedRev = revisions.find((r) => r.id === selectedRevisionId) ?? null;
+
+  /** API current 우선, 없으면 목록의 is_current 행으로 카드 즉시 표시 */
+  const showCurrentForCard = useMemo(
+    () => currentRevision ?? revisions.find((r) => r.is_current) ?? null,
+    [currentRevision, revisions],
+  );
+
+  const displayCurrentVersionLabel = useMemo(
+    () => (showCurrentForCard ? displayVersionCode(showCurrentForCard.version_code) : '—'),
+    [showCurrentForCard],
+  );
+
+  const handleDownload = useCallback(async (revisionId: number, fileName: string) => {
+    try {
+      await downloadContractRevisionPdf(revisionId, fileName);
+      toast.success('다운로드를 시작했습니다.');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : '다운로드에 실패했습니다.');
+    }
+  }, []);
+
+  const parseApproverLine = (label: string | null | undefined) => {
+    if (!label?.trim()) return { department: '—', approver: '—' };
+    const parts = label.split('|').map((s) => s.trim());
+    if (parts.length >= 2) return { department: parts[0], approver: parts.slice(1).join(' | ') };
+    return { department: '—', approver: label };
+  };
 
   const consentItems: ConsentItem[] = [
     {
@@ -208,6 +313,21 @@ export default function DataContract() {
     refused: 8,
   };
 
+  const currentApprover = showCurrentForCard
+    ? parseApproverLine(showCurrentForCard.approver_label)
+    : { department: '—', approver: '—' };
+
+  const reviewRevisions = revisions.filter((r) => r.status.toLowerCase() === 'review');
+  const firstReview = reviewRevisions[0];
+
+  const counts = statusCountsApi ?? {
+    draft: 0,
+    review: 0,
+    approved: 0,
+    active: 0,
+    retired: 0,
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -215,6 +335,12 @@ export default function DataContract() {
         <h1 className="text-3xl font-bold text-gray-900 mb-2">제3자 제공 동의서</h1>
         <p className="text-gray-600">개인정보 동의서 버전 관리 및 협력사 동의 현황 추적</p>
       </div>
+
+      {listError && (
+        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+          {listError}
+        </div>
+      )}
 
       {/* Overview Cards */}
       <div className="grid grid-cols-2 gap-6">
@@ -230,11 +356,27 @@ export default function DataContract() {
             <div>
               <div className="flex items-center gap-3 mb-2">
                 <h2 className="text-lg font-bold text-gray-900">현재 적용 중인 동의서</h2>
-                <span className={`px-3 py-1 rounded-full text-xs font-semibold ${getStatusColor('Active')}`}>
-                  Active
-                </span>
+                {showCurrentForCard ? (
+                  <span
+                    className={`px-3 py-1 rounded-full text-xs font-semibold ${getStatusColor(
+                      mapApiRevisionStatus(showCurrentForCard.status),
+                    )}`}
+                  >
+                    {mapApiRevisionStatus(showCurrentForCard.status)}
+                  </span>
+                ) : (
+                  <span className="px-3 py-1 rounded-full text-xs font-semibold bg-gray-100 text-gray-600">
+                    —
+                  </span>
+                )}
               </div>
-              <div className="text-2xl font-bold text-[#5B3BFA] mb-1">{currentVersion.version}</div>
+              <div className="text-2xl font-bold text-[#5B3BFA] mb-1">
+                {revisionsLoading
+                  ? '…'
+                  : showCurrentForCard
+                    ? displayVersionCode(showCurrentForCard.version_code)
+                    : '등록된 현재 버전 없음'}
+              </div>
             </div>
             <FileText className="w-12 h-12 text-[#5B3BFA] opacity-20" />
           </div>
@@ -243,38 +385,54 @@ export default function DataContract() {
             <div className="flex items-center gap-2 text-sm">
               <Calendar className="w-4 h-4 text-gray-400" />
               <span className="text-gray-600">적용 시작일:</span>
-              <span className="font-medium text-gray-900">{currentVersion.startDate}</span>
+              <span className="font-medium text-gray-900">
+                {showCurrentForCard ? formatDateYmd(showCurrentForCard.effective_from) : '—'}
+              </span>
             </div>
             <div className="flex items-center gap-2 text-sm">
               <User className="w-4 h-4 text-gray-400" />
               <span className="text-gray-600">담당 부서:</span>
-              <span className="font-medium text-gray-900">{currentVersion.department}</span>
+              <span className="font-medium text-gray-900">{currentApprover.department}</span>
               <span className="text-gray-400">|</span>
-              <span className="font-medium text-gray-900">{currentVersion.approver}</span>
+              <span className="font-medium text-gray-900">{currentApprover.approver}</span>
             </div>
             <div className="pt-2 border-t border-gray-100">
-              <p className="text-sm text-gray-600">{currentVersion.changeSummary}</p>
+              <p className="text-sm text-gray-600">{showCurrentForCard?.summary?.trim() || '—'}</p>
             </div>
           </div>
 
           <div className="flex gap-3">
             <button
-              className="flex-1 px-4 py-2.5 bg-gradient-to-r from-[#5B3BFA] to-[#00B4FF] text-white font-medium rounded-xl transition-all flex items-center justify-center gap-2"
-              onClick={() => toast.info('PDF 미리보기')}
+              type="button"
+              disabled={!showCurrentForCard}
+              className="flex-1 px-4 py-2.5 bg-gradient-to-r from-[#5B3BFA] to-[#00B4FF] text-white font-medium rounded-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+              onClick={() => {
+                if (!showCurrentForCard) return;
+                setSelectedRevisionId(showCurrentForCard.id);
+                setPreviewTargetId(showCurrentForCard.id);
+              }}
             >
               <Eye size={18} />
               PDF 미리보기
             </button>
             <button
-              className="px-4 py-2.5 border border-gray-300 rounded-xl text-gray-700 hover:bg-gray-50 transition-colors flex items-center gap-2"
-              onClick={() => toast.info('PDF 다운로드')}
+              type="button"
+              disabled={!showCurrentForCard}
+              className="px-4 py-2.5 border border-gray-300 rounded-xl text-gray-700 hover:bg-gray-50 transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+              onClick={() =>
+                showCurrentForCard &&
+                void handleDownload(showCurrentForCard.id, showCurrentForCard.document_storage_key)
+              }
             >
               <Download size={18} />
               다운로드
             </button>
           </div>
 
-          <button className="w-full mt-3 text-sm text-[#5B3BFA] hover:text-[#4829d4] transition-colors flex items-center justify-center gap-1">
+          <button
+            type="button"
+            className="w-full mt-3 text-sm text-[#5B3BFA] hover:text-[#4829d4] transition-colors flex items-center justify-center gap-1"
+          >
             변경 이력 보기
             <ChevronRight size={16} />
           </button>
@@ -292,11 +450,11 @@ export default function DataContract() {
 
           <div className="grid grid-cols-5 gap-3 mb-6">
             {[
-              { label: 'Draft', count: 2, color: 'text-gray-600' },
-              { label: 'Review', count: 1, color: 'text-blue-600' },
-              { label: 'Approved', count: 0, color: 'text-green-600' },
-              { label: 'Active', count: 1, color: 'text-purple-600' },
-              { label: 'Retired', count: 3, color: 'text-gray-400' },
+              { label: 'Draft', count: counts.draft, color: 'text-gray-600' },
+              { label: 'Review', count: counts.review, color: 'text-blue-600' },
+              { label: 'Approved', count: counts.approved, color: 'text-green-600' },
+              { label: 'Active', count: counts.active, color: 'text-purple-600' },
+              { label: 'Retired', count: counts.retired, color: 'text-gray-400' },
             ].map((item) => (
               <div key={item.label} className="text-center">
                 <div className={`text-2xl font-bold ${item.color}`}>{item.count}</div>
@@ -305,19 +463,24 @@ export default function DataContract() {
             ))}
           </div>
 
-          <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 mb-4">
-            <div className="flex items-start gap-3">
-              <AlertCircle className="w-5 h-5 text-blue-600 mt-0.5" />
-              <div className="flex-1">
-                <div className="text-sm font-semibold text-blue-900 mb-1">검토 중인 요청 1건</div>
-                <div className="text-xs text-blue-700">
-                  3P-2026-04 (개인정보 보호법 개정 반영) - 법무팀 검토 중
+          {firstReview ? (
+            <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 mb-4">
+              <div className="flex items-start gap-3">
+                <AlertCircle className="w-5 h-5 text-blue-600 mt-0.5" />
+                <div className="flex-1">
+                  <div className="text-sm font-semibold text-blue-900 mb-1">
+                    검토 중인 요청 {reviewRevisions.length}건
+                  </div>
+                  <div className="text-xs text-blue-700">
+                    {displayVersionCode(firstReview.version_code)} — {firstReview.title}
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
+          ) : null}
 
           <button
+            type="button"
             className="w-full px-4 py-3 bg-gradient-to-r from-[#5B3BFA] to-[#00B4FF] text-white font-medium rounded-xl transition-all flex items-center justify-center gap-2"
             onClick={() => setShowRequestModal(true)}
           >
@@ -340,65 +503,86 @@ export default function DataContract() {
           <h2 className="text-lg font-bold text-gray-900 mb-4">동의서 버전 목록</h2>
 
           <div className="space-y-3">
-            {versions.map((version) => (
-              <div
-                key={version.id}
-                className={`p-4 border-2 rounded-xl cursor-pointer transition-all ${
-                  selectedVersion === version.version
-                    ? 'border-[#5B3BFA] bg-[#5B3BFA]/5'
-                    : 'border-gray-200 hover:border-gray-300'
-                }`}
-                onClick={() => setSelectedVersion(version.version)}
-              >
-                <div className="flex items-start justify-between mb-3">
-                  <div>
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="font-bold text-gray-900">{version.version}</span>
-                      <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${getStatusColor(version.status)}`}>
-                        {version.status}
-                      </span>
+            {revisionsLoading && (
+              <div className="text-sm text-gray-500 py-8 text-center">버전 목록을 불러오는 중…</div>
+            )}
+            {!revisionsLoading &&
+              revisions.map((version) => {
+                const uiStatus = mapApiRevisionStatus(version.status);
+                return (
+                  <div
+                    key={version.id}
+                    className={`p-4 border-2 rounded-xl cursor-pointer transition-all ${
+                      selectedRevisionId === version.id
+                        ? 'border-[#5B3BFA] bg-[#5B3BFA]/5'
+                        : 'border-gray-200 hover:border-gray-300'
+                    }`}
+                    onClick={() => {
+                      setSelectedRevisionId(version.id);
+                      setPreviewTargetId(null);
+                    }}
+                  >
+                    <div className="flex items-start justify-between mb-3">
+                      <div>
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="font-bold text-gray-900">
+                            {displayVersionCode(version.version_code)}
+                          </span>
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-xs font-semibold ${getStatusColor(uiStatus)}`}
+                          >
+                            {uiStatus}
+                          </span>
+                        </div>
+                        <div className="text-xs text-gray-500">
+                          {formatDateYmd(version.effective_from)}
+                          {version.effective_until
+                            ? ` ~ ${formatDateYmd(version.effective_until)}`
+                            : ''}
+                        </div>
+                      </div>
+                      <button type="button" className="p-1 hover:bg-gray-100 rounded">
+                        <MoreVertical size={16} className="text-gray-400" />
+                      </button>
                     </div>
-                    <div className="text-xs text-gray-500">
-                      {version.startDate}
-                      {version.endDate && ` ~ ${version.endDate}`}
+
+                    <div className="text-sm text-gray-600 mb-3">{version.summary || '—'}</div>
+
+                    <div className="flex items-center gap-2 text-xs text-gray-500 mb-3">
+                      <FileText size={14} />
+                      {version.document_storage_key}
+                    </div>
+
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        className="flex-1 px-3 py-1.5 text-xs border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 transition-colors flex items-center justify-center gap-1"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedRevisionId(version.id);
+                        }}
+                      >
+                        <Eye size={14} />
+                        미리보기
+                      </button>
+                      <button
+                        type="button"
+                        className="flex-1 px-3 py-1.5 text-xs border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 transition-colors flex items-center justify-center gap-1"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void handleDownload(version.id, version.document_storage_key);
+                        }}
+                      >
+                        <Download size={14} />
+                        다운로드
+                      </button>
                     </div>
                   </div>
-                  <button className="p-1 hover:bg-gray-100 rounded">
-                    <MoreVertical size={16} className="text-gray-400" />
-                  </button>
-                </div>
-
-                <div className="text-sm text-gray-600 mb-3">{version.changeSummary}</div>
-
-                <div className="flex items-center gap-2 text-xs text-gray-500 mb-3">
-                  <FileText size={14} />
-                  {version.fileName}
-                </div>
-
-                <div className="flex gap-2">
-                  <button
-                    className="flex-1 px-3 py-1.5 text-xs border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 transition-colors flex items-center justify-center gap-1"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      toast.info('미리보기');
-                    }}
-                  >
-                    <Eye size={14} />
-                    미리보기
-                  </button>
-                  <button
-                    className="flex-1 px-3 py-1.5 text-xs border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 transition-colors flex items-center justify-center gap-1"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      toast.info('다운로드');
-                    }}
-                  >
-                    <Download size={14} />
-                    다운로드
-                  </button>
-                </div>
-              </div>
-            ))}
+                );
+              })}
+            {!revisionsLoading && revisions.length === 0 && (
+              <div className="text-sm text-gray-500 py-8 text-center">등록된 동의서 버전이 없습니다.</div>
+            )}
           </div>
         </div>
 
@@ -412,53 +596,98 @@ export default function DataContract() {
         >
           <h2 className="text-lg font-bold text-gray-900 mb-4">PDF 미리보기</h2>
 
-          {selectedVersion ? (
+          {selectedRevisionId != null && selectedRev ? (
             <>
               {/* Meta Info */}
               <div className="bg-[#F6F8FB] p-4 rounded-xl mb-4">
                 <div className="grid grid-cols-2 gap-3 text-sm">
                   <div>
                     <div className="text-gray-500 text-xs mb-1">버전</div>
-                    <div className="font-semibold text-gray-900">{selectedVersion}</div>
+                    <div className="font-semibold text-gray-900">
+                      {displayVersionCode(selectedRev.version_code)}
+                    </div>
                   </div>
                   <div>
                     <div className="text-gray-500 text-xs mb-1">상태</div>
-                    <span className={`px-2 py-1 rounded-full text-xs font-semibold ${getStatusColor(versions.find(v => v.version === selectedVersion)?.status || 'Draft')}`}>
-                      {versions.find(v => v.version === selectedVersion)?.status}
+                    <span
+                      className={`px-2 py-1 rounded-full text-xs font-semibold ${getStatusColor(
+                        mapApiRevisionStatus(selectedRev.status),
+                      )}`}
+                    >
+                      {mapApiRevisionStatus(selectedRev.status)}
                     </span>
                   </div>
                   <div>
                     <div className="text-gray-500 text-xs mb-1">적용일</div>
                     <div className="font-medium text-gray-900">
-                      {versions.find(v => v.version === selectedVersion)?.startDate}
+                      {formatDateYmd(selectedRev.effective_from)}
                     </div>
                   </div>
                   <div>
-                    <div className="text-gray-500 text-xs mb-1">승인자</div>
+                    <div className="text-gray-500 text-xs mb-1">승인·담당</div>
                     <div className="font-medium text-gray-900">
-                      {versions.find(v => v.version === selectedVersion)?.approver}
+                      {selectedRev.approver_label?.trim() || '—'}
                     </div>
                   </div>
                 </div>
               </div>
 
-              {/* PDF Viewer Placeholder */}
-              <div className="bg-gray-100 rounded-xl aspect-[3/4] flex items-center justify-center">
-                <div className="text-center">
-                  <FileText className="w-16 h-16 text-gray-300 mx-auto mb-3" />
-                  <div className="text-sm text-gray-500">PDF 미리보기</div>
-                  <div className="text-xs text-gray-400 mt-1">
-                    {versions.find(v => v.version === selectedVersion)?.fileName}
+              <div className="bg-gray-100 rounded-xl aspect-[3/4] overflow-hidden flex flex-col min-h-[480px]">
+                {previewTargetId === selectedRevisionId && previewLoading && (
+                  <div className="flex-1 flex items-center justify-center text-sm text-gray-500">
+                    PDF 불러오는 중…
                   </div>
-                </div>
+                )}
+                {previewTargetId === selectedRevisionId && !previewLoading && previewError && (
+                  <div className="flex-1 flex flex-col items-center justify-center gap-3 p-4 text-center text-sm text-red-600">
+                    <span>{previewError}</span>
+                    <button
+                      type="button"
+                      className="px-3 py-1.5 rounded-lg border border-red-200 text-red-700 text-xs hover:bg-red-50"
+                      onClick={() => {
+                        setPreviewTargetId(null);
+                        queueMicrotask(() => setPreviewTargetId(selectedRev.id));
+                      }}
+                    >
+                      다시 시도
+                    </button>
+                  </div>
+                )}
+                {previewTargetId === selectedRevisionId && !previewLoading && !previewError && previewUrl && (
+                  <iframe
+                    title="데이터 컨트랙트 PDF"
+                    src={previewUrl}
+                    className="w-full flex-1 min-h-[480px] border-0 bg-white"
+                  />
+                )}
+                {(previewTargetId == null || previewTargetId !== selectedRevisionId) &&
+                  !previewLoading && (
+                    <div className="flex-1 flex flex-col items-center justify-center gap-3 px-4 py-6">
+                      <FileText className="w-16 h-16 text-gray-300" />
+                      <p className="text-sm text-gray-500 text-center max-w-sm">
+                        PDF 용량이 클 수 있어, 버전만 선택했을 때는 자동으로 불러오지 않습니다.
+                      </p>
+                      <button
+                        type="button"
+                        className="px-4 py-2 rounded-xl bg-gradient-to-r from-[#5B3BFA] to-[#00B4FF] text-white text-sm font-medium"
+                        onClick={() => setPreviewTargetId(selectedRev.id)}
+                      >
+                        PDF 미리보기 불러오기
+                      </button>
+                      <div className="text-xs text-gray-400 break-all text-center">
+                        {selectedRev.document_storage_key}
+                      </div>
+                    </div>
+                  )}
               </div>
 
               <div className="flex gap-2 mt-4">
-                <button className="flex-1 px-4 py-2 border border-gray-300 rounded-xl text-gray-700 hover:bg-gray-50 transition-colors text-sm">
-                  페이지 이동
-                </button>
-                <button className="flex-1 px-4 py-2 border border-gray-300 rounded-xl text-gray-700 hover:bg-gray-50 transition-colors text-sm">
-                  확대/축소
+                <button
+                  type="button"
+                  className="flex-1 px-4 py-2 border border-gray-300 rounded-xl text-gray-700 hover:bg-gray-50 transition-colors text-sm"
+                  onClick={() => void handleDownload(selectedRev.id, selectedRev.document_storage_key)}
+                >
+                  이 버전 다운로드
                 </button>
               </div>
             </>
@@ -547,7 +776,7 @@ export default function DataContract() {
                           )}
                         </div>
                         <div className="text-xs text-gray-500 mb-2">
-                          노출 대상: {item.target} | 버전: {item.linkedVersion}
+                          노출 대상: {item.target} | 버전: {displayCurrentVersionLabel}
                         </div>
                         <p className="text-sm text-gray-600">{item.summary}</p>
                       </div>
@@ -640,9 +869,9 @@ export default function DataContract() {
                   className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5B3BFA]"
                 >
                   <option value="">전체</option>
-                  {versions.map((v) => (
-                    <option key={v.id} value={v.version}>
-                      {v.version}
+                  {revisions.map((v) => (
+                    <option key={v.id} value={String(v.id)}>
+                      {displayVersionCode(v.version_code)}
                     </option>
                   ))}
                 </select>

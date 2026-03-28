@@ -171,6 +171,77 @@ export async function apiFetch<T = unknown>(
   return (await res.text()) as T;
 }
 
+/** PDF 등 바이너리 응답 (Authorization·401 재시도 동일) */
+export async function apiFetchBlob(
+  path: string,
+  options: ApiClientOptions = {},
+): Promise<Blob> {
+  const { json, headers: initHeaders, retryOn401 = true, ...rest } = options;
+  const headers = new Headers(initHeaders);
+
+  if (typeof window !== "undefined") {
+    const token = getOprAccessToken();
+    if (token && !headers.has("Authorization")) {
+      headers.set("Authorization", `Bearer ${token}`);
+    }
+    const actor = localStorage.getItem(actorStorageKey());
+    if (actor && !headers.has("X-Actor-User-Id")) {
+      headers.set("X-Actor-User-Id", actor);
+    }
+  }
+
+  if (json !== undefined) {
+    headers.set("Content-Type", "application/json");
+  }
+
+  const doFetch = () =>
+    fetch(apiUrl(path), {
+      ...rest,
+      credentials: rest.credentials ?? "include",
+      headers,
+      body: json !== undefined ? JSON.stringify(json) : (rest as RequestInit).body,
+    });
+
+  let res = await doFetch();
+
+  if (
+    res.status === 401 &&
+    retryOn401 &&
+    typeof window !== "undefined" &&
+    !path.startsWith(PATH_AUTH_OPR_REFRESH) &&
+    path !== PATH_AUTH_OPR_LOGOUT
+  ) {
+    const ok = await postOprRefresh();
+    if (ok) {
+      const h2 = new Headers(initHeaders);
+      const t2 = getOprAccessToken();
+      if (t2 && !h2.has("Authorization")) {
+        h2.set("Authorization", `Bearer ${t2}`);
+      }
+      const actor2 = localStorage.getItem(actorStorageKey());
+      if (actor2 && !h2.has("X-Actor-User-Id")) {
+        h2.set("X-Actor-User-Id", actor2);
+      }
+      if (json !== undefined) {
+        h2.set("Content-Type", "application/json");
+      }
+      res = await fetch(apiUrl(path), {
+        ...rest,
+        credentials: rest.credentials ?? "include",
+        headers: h2,
+        body: json !== undefined ? JSON.stringify(json) : (rest as RequestInit).body,
+      });
+    }
+  }
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`API ${res.status}: ${text || res.statusText}`);
+  }
+
+  return res.blob();
+}
+
 /** 앱 로드 시 리프레시 쿠키가 있으면 액세스 토큰·actor 복구 */
 export async function restoreOprSessionFromCookie(): Promise<boolean> {
   if (typeof window === "undefined") return false;
