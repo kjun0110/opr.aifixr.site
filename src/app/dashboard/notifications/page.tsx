@@ -1,8 +1,14 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { Search, ThumbsDown, ThumbsUp, Calendar as CalendarIcon, RotateCcw } from 'lucide-react';
+import {
+  listMyNotifications,
+  markNotificationRead,
+  type NotificationItemOut,
+} from '../../../lib/api/notification';
+import { approveSignupRequest, rejectSignupRequest } from '../../../lib/api/iam';
 import { format, isWithinInterval, startOfDay, endOfDay } from 'date-fns';
 import { ko } from 'date-fns/locale';
 
@@ -21,7 +27,8 @@ type NotificationType =
   | 'APPROVAL_REQUEST'
   | 'APPROVED'
   | 'REJECTED'
-  | 'SUBMITTED';
+  | 'SUBMITTED'
+  | 'PARTNER_ENTRY';
 
 type Notification = {
   id: string;
@@ -37,6 +44,10 @@ type Notification = {
   isActionRequired: boolean; // 승인 요청 시 true (원청사가 승인/반려 필요)
   isRead?: boolean; // 미읽음 여부
   direction: 'inbox' | 'outbox'; // 수신함: 협력사→원청사, 발신함: 원청사→협력사
+  /** KJ nt_user_notifications.id */
+  backendId?: number;
+  fromApi?: boolean;
+  signupRequestId?: number;
 
   // APPROVAL_REQUEST 상세에 쓰는 필드
   requesterName?: string;
@@ -77,139 +88,97 @@ const getTypeBadge = (type: NotificationType) => {
       return { label: '반려', className: 'bg-red-100 text-red-800 border-red-200' };
     case 'SUBMITTED':
       return { label: '전송/제출', className: 'bg-purple-100 text-purple-800 border-purple-200' };
+    case 'PARTNER_ENTRY':
+      return { label: '협력사 진입', className: 'bg-emerald-100 text-emerald-900 border-emerald-200' };
     default:
       return { label: type, className: 'bg-gray-100 text-gray-800 border-gray-200' };
   }
 };
 
-const buildMockNotifications = (): Notification[] => {
-  // 정책: "승인 요청"은 isActionRequired로 액션 필요 여부 구분
-  const base: Notification[] = [
-    {
-      id: 'n-001',
-      type: 'APPROVAL_REQUEST',
-      tier: 1,
-      customerId: 'c-001',
-      customerName: '현대자동차(고객사)',
-      productName: '제품 A',
-      siteName: 'Korea Plant',
-      companyName: '신소재산업(주)',
-      timestamp: '2026-03-04T10:15:00.000Z',
-      message: '(신소재산업(주)) 제3자 제공 동의서 승인 요청이 도착했습니다.',
-      isActionRequired: true,
-      isRead: false,
-      direction: 'inbox',
-      requesterName: '신소재산업(주) 담당자',
-      requesterEmail: 'contact@shinsozae.co.kr',
-      requestMessage: '요청 드리는 제3자 제공 동의서 버전 확인 부탁드립니다.',
-      dataContractVersion: '3P-2026-03',
-    },
-    {
-      id: 'n-002',
-      type: 'DATA_UPDATE',
-      tier: 2,
-      customerId: 'c-001',
-      customerName: '현대자동차(고객사)',
-      productName: '제품 A',
-      siteName: 'Japan Factory',
-      companyName: 'Global Metals Corp.',
-      timestamp: '2026-03-03T23:40:00.000Z',
-      message: '(Global Metals Corp.) 원료 데이터가 업데이트 되었습니다.',
-      isActionRequired: false,
-      isRead: true,
-      direction: 'inbox',
-    },
-    {
-      id: 'n-003',
-      type: 'PCF_CALC',
-      tier: 1,
-      customerId: 'c-002',
-      customerName: '삼성디스플레이(고객사)',
-      productName: '제품 B',
-      siteName: 'Taiwan Plant',
-      companyName: '(주)테크노소재',
-      timestamp: '2026-03-03T09:05:00.000Z',
-      message: '(주)테크노소재의 PCF 산정이 완료되었습니다.',
-      isActionRequired: false,
-      isRead: false,
-      direction: 'inbox',
-    },
-    {
-      id: 'n-004',
-      type: 'APPROVED',
-      tier: 1,
-      customerId: 'c-001',
-      customerName: '현대자동차(고객사)',
-      productName: '제품 A',
-      siteName: 'Korea Plant',
-      companyName: '글로벌파트너스',
-      timestamp: '2026-03-02T14:30:00.000Z',
-      message: '제3자 제공 동의서 승인 완료 처리되었습니다.',
-      isActionRequired: false,
-      isRead: true,
-      direction: 'outbox',
-    },
-    {
-      id: 'n-005',
-      type: 'REJECTED',
-      tier: 1,
-      customerId: 'c-002',
-      customerName: '삼성디스플레이(고객사)',
-      productName: '제품 B',
-      siteName: 'Taiwan Plant',
-      companyName: '아시아컴포넌트',
-      timestamp: '2026-03-01T06:55:00.000Z',
-      message: '승인이 반려되었습니다. 계약 내용을 확인해 주세요.',
-      isActionRequired: false,
-      isRead: true,
-      direction: 'outbox',
-    },
-    {
-      id: 'n-006',
-      type: 'SUBMITTED',
-      tier: 3,
-      customerId: 'c-001',
-      customerName: '현대자동차(고객사)',
-      productName: '제품 A',
-      siteName: 'USA Site',
-      companyName: 'Tech Components LLC',
-      timestamp: '2026-02-27T11:20:00.000Z',
-      message: '데이터가 전송/제출되었습니다.',
-      isActionRequired: false,
-      isRead: false,
-      direction: 'inbox',
-    },
-    {
-      id: 'n-007',
-      type: 'DATA_UPDATE',
-      tier: 1,
-      customerId: 'c-003',
-      customerName: 'SK하이닉스(고객사)',
-      productName: '제품 C',
-      siteName: 'EU Warehouse',
-      companyName: 'Korea Battery Co.',
-      timestamp: '2026-02-25T18:10:00.000Z',
-      message: '(Korea Battery Co.) BOM 데이터가 업데이트 되었습니다.',
-      isActionRequired: false,
-      isRead: true,
-      direction: 'inbox',
-    },
-  ];
+function mapKjNotification(row: NotificationItemOut): Notification {
+  const ts = row.created_at || new Date().toISOString();
+  const isRead = Boolean(row.read_at);
+  const shared = {
+    id: `kj-${row.id}`,
+    backendId: row.id,
+    fromApi: true as const,
+    tier: 1,
+    customerId: '',
+    customerName: row.title,
+    productName: '',
+    siteName: '—',
+    timestamp: ts,
+    isRead,
+    direction: 'inbox' as const,
+  };
 
-  return base;
-};
+  if (row.notification_type === 'signup_submitted_for_review') {
+    const companyMatch = row.body?.match(/「([^」]+)」/);
+    const companyName = companyMatch?.[1]?.replace(/님$/, '')?.trim() || '협력사';
+    return {
+      ...shared,
+      type: 'APPROVAL_REQUEST',
+      companyName,
+      customerName: row.title,
+      message: row.body || '프로젝트 진입 요청이 발생했습니다.',
+      isActionRequired: true,
+      signupRequestId: row.signup_request_id ?? undefined,
+      requesterName: `${companyName} 담당자`,
+      requestMessage: row.body || undefined,
+    };
+  }
+
+  if (row.notification_type === 'signup_approved_broadcast') {
+    return {
+      ...shared,
+      type: 'PARTNER_ENTRY',
+      companyName: '협력사',
+      message: row.body || '',
+      isActionRequired: false,
+    };
+  }
+
+  return {
+    ...shared,
+    type: 'DATA_UPDATE',
+    companyName: '협력사',
+    message: row.body || row.title,
+    isActionRequired: false,
+  };
+}
 
 type DateRange = { from?: Date; to?: Date };
 
 export default function NotificationsPage() {
-  const [notifications, setNotifications] = useState<Notification[]>(buildMockNotifications);
+  const [notifications, setNotifications] = useState<Notification[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [listLoading, setListLoading] = useState(true);
+  const [listError, setListError] = useState<string | null>(null);
+  const [actionLoading, setActionLoading] = useState(false);
 
   const [mailbox, setMailbox] = useState<'inbox' | 'outbox'>('inbox');
   const [showUnreadOnly, setShowUnreadOnly] = useState(false);
   const [showActionRequiredOnly, setShowActionRequiredOnly] = useState(false);
   const [dateRange, setDateRange] = useState<DateRange | undefined>(undefined);
   const [search, setSearch] = useState<string>('');
+
+  const loadNotifications = useCallback(async () => {
+    setListLoading(true);
+    setListError(null);
+    try {
+      const rows = await listMyNotifications({ limit: 100, offset: 0 });
+      setNotifications(rows.map(mapKjNotification));
+    } catch (e) {
+      setListError(e instanceof Error ? e.message : '알림을 불러오지 못했습니다.');
+      setNotifications([]);
+    } finally {
+      setListLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadNotifications();
+  }, [loadNotifications]);
 
   const filtered = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -267,55 +236,70 @@ export default function NotificationsPage() {
 
   const handleSelectNotification = (id: string) => {
     setSelectedId(id);
-    setNotifications((prev) =>
-      prev.map((n) => (n.id === id ? { ...n, isRead: true } : n))
-    );
+    const n = notifications.find((x) => x.id === id);
+    if (n?.fromApi && n.backendId != null && !n.isRead) {
+      void markNotificationRead(n.backendId)
+        .then(() => {
+          setNotifications((prev) =>
+            prev.map((x) => (x.id === id ? { ...x, isRead: true } : x)),
+          );
+        })
+        .catch(() => {
+          setNotifications((prev) =>
+            prev.map((x) => (x.id === id ? { ...x, isRead: true } : x)),
+          );
+        });
+    } else {
+      setNotifications((prev) =>
+        prev.map((x) => (x.id === id ? { ...x, isRead: true } : x)),
+      );
+    }
   };
 
-  const handleApprove = () => {
-    if (!selected || selected.type !== 'APPROVAL_REQUEST') return;
-    setNotifications((prev) =>
-      prev.map((n) =>
-        n.id === selected.id
-          ? {
-              ...n,
-              type: 'APPROVED',
-              isActionRequired: false,
-              direction: 'outbox',
-              isRead: true,
-              timestamp: new Date().toISOString(),
-              message: `승인이 완료되었습니다. (${n.companyName})`,
-            }
-          : n,
-      ),
-    );
+  const handleApprove = async () => {
+    if (!selected?.signupRequestId) return;
+    setActionLoading(true);
+    try {
+      await approveSignupRequest(selected.signupRequestId);
+      setSelectedId(null);
+      await loadNotifications();
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : '승인 처리에 실패했습니다.');
+    } finally {
+      setActionLoading(false);
+    }
   };
 
-  const handleReject = () => {
-    if (!selected || selected.type !== 'APPROVAL_REQUEST') return;
-    setNotifications((prev) =>
-      prev.map((n) =>
-        n.id === selected.id
-          ? {
-              ...n,
-              type: 'REJECTED',
-              isActionRequired: false,
-              direction: 'outbox',
-              isRead: true,
-              timestamp: new Date().toISOString(),
-              message: `승인이 반려되었습니다. (${n.companyName})`,
-            }
-          : n,
-      ),
-    );
+  const handleReject = async () => {
+    if (!selected?.signupRequestId) return;
+    const reason = window.prompt('반려 사유(선택)') ?? '';
+    setActionLoading(true);
+    try {
+      await rejectSignupRequest(selected.signupRequestId, reason.trim() || undefined);
+      setSelectedId(null);
+      await loadNotifications();
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : '반려 처리에 실패했습니다.');
+    } finally {
+      setActionLoading(false);
+    }
   };
 
-  const shouldShowApprovalActions = selected?.type === 'APPROVAL_REQUEST' && selected?.isActionRequired;
+  const shouldShowApprovalActions =
+    selected?.type === 'APPROVAL_REQUEST' &&
+    selected?.isActionRequired &&
+    Boolean(selected.signupRequestId);
 
   return (
     <div className="space-y-6">
       <div className="mb-8">
         <h1 className="text-5xl font-bold text-gray-900 mb-4">알림</h1>
+        {listError && (
+          <p className="text-sm text-red-600 mb-2" role="alert">
+            {listError}
+          </p>
+        )}
+        {listLoading && <p className="text-sm text-gray-500">알림을 불러오는 중…</p>}
       </div>
 
       {/* 필터 영역 - 기간 선택 + 검색 (협력사와 동일) */}
@@ -473,7 +457,11 @@ export default function NotificationsPage() {
             <div className="text-base text-gray-500">{filtered.length}건</div>
           </CardHeader>
           <CardContent className="p-0">
-            {filtered.length === 0 ? (
+            {mailbox === 'outbox' ? (
+              <div className="p-4 text-base text-gray-500">
+                발신함은 추후 연동 예정입니다. 수신함에서 프로젝트 진입 요청을 확인해 주세요.
+              </div>
+            ) : filtered.length === 0 ? (
               <div className="p-4 text-base text-gray-500">표시할 알림이 없습니다.</div>
             ) : (
               <>
@@ -632,8 +620,9 @@ export default function NotificationsPage() {
                       </div>
                       <div className="flex gap-2">
                         <Button
-                          onClick={handleApprove}
+                          onClick={() => void handleApprove()}
                           size="sm"
+                          disabled={actionLoading}
                           className="bg-green-600 hover:bg-green-700"
                         >
                           <ThumbsUp size={14} className="mr-1.5" />
@@ -642,7 +631,8 @@ export default function NotificationsPage() {
                         <Button
                           variant="outline"
                           size="sm"
-                          onClick={handleReject}
+                          onClick={() => void handleReject()}
+                          disabled={actionLoading}
                           className="border-red-200 text-red-600 hover:bg-red-50"
                         >
                           <ThumbsDown size={14} className="mr-1.5" />

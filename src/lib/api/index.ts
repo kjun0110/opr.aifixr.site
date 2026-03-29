@@ -14,6 +14,10 @@ export { SUPPLY_CHAIN_BASE } from "./supply-chain";
 export { DATA_MGMT_BASE } from "./data-mgmt";
 export { getInvitationHealth } from "./invitation";
 export { DATA_CONTRACT_BASE } from "./data-contract";
-export { NOTIFICATION_BASE } from "./notification";
+export {
+  listMyNotifications,
+  markNotificationRead,
+  type NotificationItemOut,
+} from "./notification";
 export { PCF_BASE } from "./pcf";
 
