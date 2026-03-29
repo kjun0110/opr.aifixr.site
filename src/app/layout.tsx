@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { ModeProvider } from './context/ModeContext';
 import OprSessionRestore from './components/OprSessionRestore';
+import { OprGoogleLinkReturnHandler } from './components/OprGoogleLinkReturnHandler';
 import { Toaster } from './components/ui/sonner';
 import '../styles/index.css';
 
@@ -19,6 +20,7 @@ export default function RootLayout({
       <body>
         <ModeProvider>
           <OprSessionRestore />
+          <OprGoogleLinkReturnHandler />
           {children}
           <Toaster />
         </ModeProvider>

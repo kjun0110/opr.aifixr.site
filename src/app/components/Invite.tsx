@@ -5,6 +5,7 @@ import { Upload, Plus, FileText, Eye, Send, CheckCircle, Clock, AlertCircle, Che
 import { toast } from 'sonner';
 import { useMode } from '../context/ModeContext';
 import { getInvitationHistory, postOprInvitation, type InvitationHistoryItem } from '@/lib/api/invitation';
+import { startOprGoogleLinkFlow } from '@/lib/api/oprGoogleLink';
 import { apiFetch } from '@/lib/api/client';
 import { approveSignupRequest, rejectSignupRequest } from '@/lib/api/iam';
 
@@ -473,7 +474,21 @@ https://aifix.com/signup
         });
         success += 1;
       } catch (e) {
-        failMessages.push(e instanceof Error ? e.message : '발송 실패');
+        const msg = e instanceof Error ? e.message : '발송 실패';
+        if (msg.includes('428') || msg.toLowerCase().includes('gmail')) {
+          toast.message(
+            '초대 메일은 연동된 Google 계정(Gmail)으로 발송됩니다. Google 연동 화면으로 이동합니다.',
+          );
+          try {
+            await startOprGoogleLinkFlow({ fromInvite: true });
+          } catch (e2) {
+            toast.error(
+              e2 instanceof Error ? e2.message : 'Google 연동을 시작할 수 없습니다.',
+            );
+          }
+          return;
+        }
+        failMessages.push(msg);
       }
     }
     if (success > 0) {

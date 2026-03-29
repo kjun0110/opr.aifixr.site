@@ -1,8 +1,20 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { ArrowLeft, Building2, MapPin, Package, TrendingUp, CheckCircle, AlertTriangle, Download, Upload, Plus, Edit2, Trash2, Lock, FileText, Save } from 'lucide-react';
+import {
+  AlertTriangle,
+  ArrowLeft,
+  Building2,
+  Download,
+  Upload,
+  Plus,
+  Trash2,
+  Lock,
+  FileText,
+  Save,
+  ChevronDown,
+} from 'lucide-react';
 import { toast } from 'sonner';
 import { useMode } from '../context/ModeContext';
 
@@ -15,7 +27,10 @@ interface Tier0DetailData {
   country: string;
   productType: string;
   deliveryVolume: number;
+  /** 부분 PCF(공정/범위 산정) */
   pcfResult: number | null;
+  /** 최종 PCF(전체 제품 단위); null이면 미산정 */
+  pcfResultFinal: number | null;
   status: string;
   
   // Interface Data (Read Only)
@@ -106,6 +121,7 @@ const mockTier0Data: Record<string, Tier0DetailData> = {
     productType: '배터리 모듈',
     deliveryVolume: 50000,
     pcfResult: 32420.3,
+    pcfResultFinal: null,
     status: 'Verified',
     organizationInfo: {
       companyName: '삼성SDI',
@@ -259,6 +275,7 @@ const mockTier0Data: Record<string, Tier0DetailData> = {
     productType: '전고체 배터리',
     deliveryVolume: 40000,
     pcfResult: 38520.8,
+    pcfResultFinal: null,
     status: 'Verified',
     organizationInfo: {
       companyName: '삼성SDI',
@@ -349,6 +366,7 @@ const mockTier0Data: Record<string, Tier0DetailData> = {
     productType: 'ESS 모듈',
     deliveryVolume: 30000,
     pcfResult: 24850.4,
+    pcfResultFinal: null,
     status: 'Verified',
     organizationInfo: {
       companyName: '삼성SDI',
@@ -443,8 +461,75 @@ export default function Tier0Detail() {
   const { companyId } = useParams();
   const router = useRouter();
   const { mode } = useMode();
-  const [activeTab, setActiveTab] = useState(0);
+  const [activeTab, setActiveTab] = useState(1);
   const [showUploadModal, setShowUploadModal] = useState(false);
+  const [editableSiteManagers, setEditableSiteManagers] = useState<
+    {
+      rowId: string;
+      siteName: string;
+      department: string;
+      position: string;
+      name: string;
+      email: string;
+      phone: string;
+    }[]
+  >([]);
+  const [editableEnergyInfo, setEditableEnergyInfo] = useState<
+    {
+      rowId: string;
+      detailProductName: string;
+      processName: string;
+      energyType: string;
+      energyUsage: number;
+      energyUnit: string;
+      emissionFactor: number;
+      emissionFactorUnit: string;
+    }[]
+  >([]);
+
+  const [editableMaterials, setEditableMaterials] = useState<
+    {
+      rowId: string;
+      detailProductName: string;
+      processName: string;
+      inputMaterialName: string;
+      inputAmount: number;
+      inputAmountUnit: string;
+      materialEmissionFactor: number;
+      materialEmissionFactorUnit: string;
+      mineralType: string;
+      mineralAmount: number;
+      mineralOrigin: string;
+      mineralEmissionFactor: number;
+      mineralEmissionFactorUnit: string;
+    }[]
+  >([]);
+
+  const [editableProductionRows, setEditableProductionRows] = useState<any[]>([]);
+
+  const [siteManagerEditCell, setSiteManagerEditCell] = useState<{
+    rowIndex: number;
+    field: string;
+    snapshot: any;
+  } | null>(null);
+
+  const [materialEditCell, setMaterialEditCell] = useState<{
+    rowIndex: number;
+    field: string;
+    snapshot: any;
+  } | null>(null);
+
+  const [energyEditCell, setEnergyEditCell] = useState<{
+    rowIndex: number;
+    field: string;
+    snapshot: any;
+  } | null>(null);
+
+  const [productionEditCell, setProductionEditCell] = useState<{
+    rowIndex: number;
+    field: string;
+    snapshot: any;
+  } | null>(null);
   
   const companyKey = Array.isArray(companyId) ? companyId[0] : companyId;
   // DataView 새 구조(card-xxx-month-tier0) 지원: mock에 없으면 기본 원청사 데이터 사용
@@ -459,24 +544,352 @@ export default function Tier0Detail() {
       </div>
     );
   }
+
+  const deliveryUnit = 'EA';
+  const decodedCompanyId = (() => {
+    const raw = typeof companyKey === 'string' ? companyKey : String(companyKey ?? '');
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw;
+    }
+  })();
+
+  const parsedHeaderFromCompanyId = (() => {
+    const monthMatch = decodedCompanyId.match(/(\d{4}-\d{2})-tier0$/);
+    const yearMonth = monthMatch?.[1] ?? '';
+
+    const withoutMonth = yearMonth
+      ? decodedCompanyId.replace(new RegExp(`-${yearMonth}-tier0$`), '')
+      : decodedCompanyId.replace(/-tier0$/, '');
+
+    const cardPrefix = 'card-';
+    if (!withoutMonth.startsWith(cardPrefix)) {
+      return { yearMonth, customer: '', branch: '', product: '', detailProduct: '' };
+    }
+
+    const tokens = withoutMonth.slice(cardPrefix.length).split('-');
+    // 마지막 토큰은 인덱스(i)
+    const idxToken = tokens.pop();
+    const customer = tokens[0] ?? '';
+    const branch = tokens[1] ?? '';
+    const product = tokens[2] ?? '';
+    const detailProduct = tokens.slice(3).join('-');
+
+    // idxToken은 UI에 필요 없지만, 파싱 유효성 체크용으로만 사용
+    const valid = typeof idxToken === 'string' && idxToken.length > 0;
+    return { yearMonth: valid ? yearMonth : '', customer, branch, product, detailProduct };
+  })();
+
+  const sessionHeader = (() => {
+    try {
+      const raw = sessionStorage.getItem('aifix_data_view_filters_v1');
+      if (!raw) return {};
+      return JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  })();
+
+  const contractPeriodLabelFromSession =
+    String(sessionHeader.selectedContractPeriodLabel ?? '') ||
+    (sessionHeader.selectedPeriodStart && sessionHeader.selectedPeriodEnd
+      ? `${String(sessionHeader.selectedPeriodStart).replace('-', '.')} ~ ${String(sessionHeader.selectedPeriodEnd).replace('-', '.')}`
+      : '');
+
+  const mBomLabel = String(sessionHeader.selectedBomCode ?? '').trim();
+
+  const formatYmSlash = (ym: string) => (ym ? ym.replace('-', '/') : '');
+  const formatYmDot = (ym: string) => (ym ? ym.replace('-', '.') : '');
+  const formatDeliveryDate = (ym: string) => (ym ? `${formatYmDot(ym)}.01` : '');
+
+  const customerLabel = parsedHeaderFromCompanyId.customer || String(sessionHeader.selectedCustomer ?? '');
+  const branchLabel = parsedHeaderFromCompanyId.branch || String(sessionHeader.selectedBranch ?? '');
+  const productLabel = parsedHeaderFromCompanyId.product || String(sessionHeader.selectedProduct ?? '');
+  const detailProductLabel =
+    parsedHeaderFromCompanyId.detailProduct || String(sessionHeader.selectedDetailProduct ?? '');
+
+  const contractPeriodLabel = contractPeriodLabelFromSession || '-';
+  const yearMonthLabel = parsedHeaderFromCompanyId.yearMonth ? formatYmSlash(parsedHeaderFromCompanyId.yearMonth) : '-';
+  const deliveryDateLabel = parsedHeaderFromCompanyId.yearMonth ? formatDeliveryDate(parsedHeaderFromCompanyId.yearMonth) : '-';
+
+  const pcfPartialValue = company.pcfResult;
+  const pcfFinalValue = company.pcfResultFinal ?? null;
+  const pcfPrimaryKpiValue = pcfFinalValue !== null ? pcfFinalValue : pcfPartialValue;
   
   const tabs = [
-    { id: 0, name: '기업 및 조직 식별 정보', readOnly: true },
-    { id: 1, name: '사업장 정보', readOnly: true },
-    { id: 2, name: '자재 및 품목', readOnly: true },
-    { id: 3, name: '주요설비정보', readOnly: true },
-    { id: 4, name: '공정 활동 데이터', readOnly: false },
-    { id: 5, name: '담당자 정보', readOnly: true },
+    { id: 1, name: '사업장 정보' },
+    { id: 2, name: '담당자 정보' },
+    { id: 3, name: '설비 정보' },
+    { id: 4, name: '사업장 담당자 정보' },
+    { id: 5, name: '자재 정보' },
+    { id: 6, name: '에너지 정보' },
+    { id: 7, name: '생산 정보' },
   ];
 
-  // 구매 직무에서는 모든 탭이 읽기 전용, ESG 직무에서는 원래 설정 유지
+  // 구매 직무: 전체 탭 잠금
+  // ESG 직무: 앞 3개(사업장/원청직원/설비) 잠금, 뒤 4개 수정 가능
   const isTabEditable = (tabId: number) => {
     if (mode === 'procurement') return false;
-    return !tabs[tabId].readOnly;
+    return tabId >= 3;
   };
 
   // 전체 공정 활동 데이터 (공정명 컬럼으로 통합 표시)
   const allActivityData = company.processPerformanceInfo;
+
+  // SupplierDetail(협력사 화면)과 동일 테이블 스타일로 통일
+  const SUP_DETAIL_TABLE = 'w-full border-collapse border border-gray-300';
+  const SUP_DETAIL_TABLE_EDITABLE =
+    'w-full min-w-[1200px] table-fixed border-collapse border border-gray-300';
+  const SUP_DETAIL_TH =
+    'border border-gray-300 bg-[#F8F9FA] py-4 px-4 text-left align-middle text-sm font-semibold text-[var(--aifix-navy)] min-w-0 overflow-hidden whitespace-normal break-words';
+  const SUP_DETAIL_TD =
+    'border border-gray-300 py-4 px-4 align-top min-w-0 overflow-hidden whitespace-normal break-words';
+  const SUP_DETAIL_TH_ACTION =
+    'border border-gray-300 bg-[#F8F9FA] py-4 px-3 text-right align-middle text-sm font-semibold text-[var(--aifix-navy)] whitespace-nowrap sticky right-0 z-[2] shadow-[-8px_0_16px_-10px_rgba(15,23,42,0.25)]';
+  const SUP_DETAIL_TD_ACTION =
+    'border border-gray-300 bg-white py-4 px-3 align-top sticky right-0 z-[1] group-hover:bg-gray-50 shadow-[-8px_0_16px_-10px_rgba(15,23,42,0.2)]';
+  const SUP_DETAIL_COMBO_TRIGGER =
+    'box-border flex h-8 min-h-[32px] w-full min-w-0 max-w-full items-center justify-between gap-1 rounded-md border border-[#E2E8F0] bg-white px-2 text-left text-sm text-[var(--aifix-navy)] outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--aifix-primary)]';
+
+  const cellShellClass =
+    'box-border flex h-8 min-h-[32px] w-full min-w-0 max-w-full items-center rounded-md border border-[#E2E8F0] bg-white px-2 text-sm';
+
+  const safeValue = (v: unknown) => (v === null || v === undefined || String(v).trim() === '' ? '-' : String(v));
+  const detailProductName = company.productType ?? '';
+  const siteNameOptions = (company.siteInfo ?? []).map((s) => s.siteName).filter(Boolean);
+  const processNameOptions = Array.from(
+    new Set([
+      ...editableMaterials.map((r) => String(r.processName ?? '').trim()),
+      ...editableEnergyInfo.map((r) => String(r.processName ?? '').trim()),
+      ...editableProductionRows.map((r) => String(r.processName ?? '').trim()),
+      ...((company.processPerformanceInfo ?? []).map((p) => String(p.processName ?? '').trim())),
+    ].filter(Boolean)),
+  );
+  const mineralOriginOptions = Array.from(new Set((company.siteInfo ?? []).map((s) => s.country).filter(Boolean)));
+  const materialNameBaseOptions = Array.from(new Set((company.materialInfo ?? []).map((m) => m.materialName).filter(Boolean)));
+  const unitBaseOptions = ['kg', 'g', 'ton', 'EA', 'm3', 'L'];
+  const mineralTypeBaseOptions = ['리튬', '니켈', '코발트', '망간', '흑연'];
+  const energyTypeBaseOptions = ['전기', '스팀', 'LNG', '경유', '수소'];
+  const materialEfUnitBaseOptions = ['kgCO2e/kg', 'kgCO2e/ton', 'kgCO2e/L', 'kgCO2e/Nm3'];
+  const mineralEfUnitBaseOptions = ['kgCO2e/kg', 'kgCO2e/ton'];
+  const energyEfUnitBaseOptions = ['kgCO2e/kWh', 'kgCO2e/MJ', 'kgCO2e/Nm3', 'kgCO2e/L'];
+
+  function SearchableSelectStrict({
+    value,
+    onChange,
+    options,
+    placeholder = '검색',
+    emptyLabel = '선택',
+  }: {
+    value: string;
+    onChange: (v: string) => void;
+    options: readonly string[];
+    placeholder?: string;
+    emptyLabel?: string;
+  }) {
+    const [open, setOpen] = useState(false);
+    const [q, setQ] = useState('');
+    const rootRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+      const onDoc = (e: MouseEvent) => {
+        if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+      };
+      document.addEventListener('mousedown', onDoc);
+      return () => document.removeEventListener('mousedown', onDoc);
+    }, []);
+
+    const filtered = useMemo(() => {
+      const s = q.trim().toLowerCase();
+      if (!s) return [...options];
+      return options.filter((o) => o.toLowerCase().includes(s));
+    }, [options, q]);
+
+    return (
+      <div className="relative min-w-0 max-w-full" ref={rootRef}>
+        <button type="button" onClick={() => { setOpen((o) => !o); if (!open) setQ(''); }} className={SUP_DETAIL_COMBO_TRIGGER}>
+          <span className="min-w-0 flex-1 truncate">{value.trim() ? value : emptyLabel}</span>
+          <ChevronDown className="h-4 w-4 shrink-0 opacity-60" />
+        </button>
+        {open && (
+          <div className="absolute left-0 right-0 top-full z-[60] mt-1 max-h-52 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-lg">
+            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder={placeholder} className="box-border w-full border-b border-gray-100 px-2 py-1.5 text-sm outline-none" />
+            <ul className="max-h-40 overflow-y-auto py-1">
+              <li><button type="button" className="w-full px-2 py-1.5 text-left text-sm text-gray-400 hover:bg-gray-50" onClick={() => { onChange(''); setOpen(false); setQ(''); }}>{emptyLabel}</button></li>
+              {filtered.map((opt) => (
+                <li key={opt}>
+                  <button type="button" className="w-full px-2 py-1.5 text-left text-sm text-[var(--aifix-navy)] hover:bg-violet-50" onClick={() => { onChange(opt); setOpen(false); setQ(''); }}>
+                    {opt}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function SearchableSelectCreatable({
+    value,
+    onChange,
+    baseOptions,
+    placeholder = '검색 또는 입력',
+    emptyLabel = '선택',
+  }: {
+    value: string;
+    onChange: (v: string) => void;
+    baseOptions: readonly string[];
+    placeholder?: string;
+    emptyLabel?: string;
+  }) {
+    const [open, setOpen] = useState(false);
+    const [q, setQ] = useState('');
+    const [extra, setExtra] = useState<string[]>([]);
+    const rootRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+      const onDoc = (e: MouseEvent) => {
+        if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+      };
+      document.addEventListener('mousedown', onDoc);
+      return () => document.removeEventListener('mousedown', onDoc);
+    }, []);
+
+    const allOptions = useMemo(() => Array.from(new Set([...baseOptions, ...extra, ...(value ? [value] : [])])), [baseOptions, extra, value]);
+    const filtered = useMemo(() => {
+      const t = q.trim().toLowerCase();
+      if (!t) return allOptions;
+      return allOptions.filter((o) => o.toLowerCase().includes(t));
+    }, [allOptions, q]);
+    const canAdd = q.trim().length > 0 && !allOptions.some((o) => o.toLowerCase() === q.trim().toLowerCase());
+
+    return (
+      <div className="relative min-w-0 max-w-full" ref={rootRef}>
+        <button type="button" onClick={() => { setOpen((o) => !o); if (!open) setQ(''); }} className={SUP_DETAIL_COMBO_TRIGGER}>
+          <span className="min-w-0 flex-1 truncate">{value.trim() ? value : emptyLabel}</span>
+          <ChevronDown className="h-4 w-4 shrink-0 opacity-60" />
+        </button>
+        {open && (
+          <div className="absolute left-0 right-0 top-full z-[60] mt-1 max-h-52 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-lg">
+            <input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder={placeholder}
+              className="box-border w-full border-b border-gray-100 px-2 py-1.5 text-sm outline-none"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && canAdd) {
+                  e.preventDefault();
+                  const v = q.trim();
+                  setExtra((prev) => Array.from(new Set([...prev, v])));
+                  onChange(v);
+                  setQ('');
+                  setOpen(false);
+                }
+              }}
+            />
+            <ul className="max-h-40 overflow-y-auto py-1">
+              <li><button type="button" className="w-full px-2 py-1.5 text-left text-sm text-gray-400 hover:bg-gray-50" onClick={() => { onChange(''); setOpen(false); setQ(''); }}>{emptyLabel}</button></li>
+              {filtered.map((opt) => (
+                <li key={opt}>
+                  <button type="button" className="w-full px-2 py-1.5 text-left text-sm text-[var(--aifix-navy)] hover:bg-violet-50" onClick={() => { onChange(opt); setOpen(false); setQ(''); }}>
+                    {opt}
+                  </button>
+                </li>
+              ))}
+              {canAdd && (
+                <li>
+                  <button type="button" className="w-full px-2 py-1.5 text-left text-sm text-[var(--aifix-primary)] hover:bg-violet-50" onClick={() => {
+                    const v = q.trim();
+                    setExtra((prev) => Array.from(new Set([...prev, v])));
+                    onChange(v);
+                    setOpen(false);
+                    setQ('');
+                  }}>
+                    "{q.trim()}" 추가
+                  </button>
+                </li>
+              )}
+            </ul>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const createEmptyProductionRow = () => ({
+    rowId: `new-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    detailProductName: company.productType ?? '',
+    siteName: '',
+    productionAmount: 0,
+    productionUnit: '',
+    wasteAmount: 0,
+    wasteEmissionFactor: 0,
+    wasteEmissionFactorUnit: '',
+  });
+
+  const createEmptySiteManagerRow = () => ({
+    rowId: `new-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    siteName: '',
+    department: '',
+    position: '',
+    name: '',
+    email: '',
+    phone: '',
+  });
+
+  const createEmptyMaterialRow = () => ({
+    rowId: `new-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    detailProductName: company.productType ?? '',
+    processName: '',
+    inputMaterialName: '',
+    inputAmount: 0,
+    inputAmountUnit: '',
+    materialEmissionFactor: 0,
+    materialEmissionFactorUnit: '',
+    mineralType: '',
+    mineralAmount: 0,
+    mineralOrigin: '',
+    mineralEmissionFactor: 0,
+    mineralEmissionFactorUnit: '',
+  });
+
+  const createEmptyEnergyRow = () => ({
+    rowId: `new-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    detailProductName: company.productType ?? '',
+    processName: '',
+    energyType: '',
+    energyUsage: 0,
+    energyUnit: '',
+    emissionFactor: 0,
+    emissionFactorUnit: '',
+  });
+
+  useEffect(() => {
+    // 요청사항: 더미데이터 제거 + 첫 행은 비어있는 기본행으로 시작
+    setEditableSiteManagers([createEmptySiteManagerRow()]);
+    setEditableEnergyInfo([createEmptyEnergyRow()]);
+    setEditableMaterials([createEmptyMaterialRow()]);
+
+    const mappedProduction = (company.processPerformanceInfo ?? []).map((p) => ({
+      rowId: p.id,
+      detailProductName: company.productType ?? '',
+      siteName: company.siteInfo?.[0]?.siteName ?? '',
+      productionAmount: p.output ?? 0,
+      productionUnit: 'EA',
+      wasteAmount: p.waste ?? 0,
+      wasteEmissionFactor: p.emissionFactor ?? 0,
+      wasteEmissionFactorUnit: '',
+    }));
+    setEditableProductionRows(
+      mappedProduction.length > 0 ? mappedProduction : [createEmptyProductionRow()],
+    );
+    setProductionEditCell(null);
+    setSiteManagerEditCell(null);
+    setMaterialEditCell(null);
+    setEnergyEditCell(null);
+  }, [companyKey]);
 
   const handleExcelDownload = () => {
     toast.success('Excel 파일을 다운로드합니다');
@@ -487,11 +900,345 @@ export default function Tier0Detail() {
   };
 
   const handleAddRow = () => {
+    if (!isTabEditable(activeTab)) {
+      toast.info('수정 권한이 없습니다.');
+      return;
+    }
+
+    if (activeTab === 4) {
+      setEditableSiteManagers((prev) => [...prev, createEmptySiteManagerRow()]);
+      setSiteManagerEditCell(null);
+    } else if (activeTab === 5) {
+      setEditableMaterials((prev) => [...prev, createEmptyMaterialRow()]);
+      setMaterialEditCell(null);
+    } else if (activeTab === 6) {
+      setEditableEnergyInfo((prev) => [...prev, createEmptyEnergyRow()]);
+      setEnergyEditCell(null);
+    } else if (activeTab === 7) {
+      setEditableProductionRows((prev) => [...prev, createEmptyProductionRow()]);
+      setProductionEditCell(null);
+    }
     toast.info('새 행을 추가합니다');
   };
 
   const handleSave = () => {
     toast.success('저장되었습니다');
+  };
+
+  const handleInsertProductionRowAfter = (rowIndex: number) => {
+    setEditableProductionRows((prev) => {
+      const next = [...prev];
+      next.splice(rowIndex + 1, 0, createEmptyProductionRow());
+      return next;
+    });
+    setProductionEditCell(null);
+  };
+
+  const handleRemoveProductionRowAt = (rowIndex: number) => {
+    setEditableProductionRows((prev) => {
+      if (prev.length <= 1) return [createEmptyProductionRow()];
+      return prev.filter((_, i) => i !== rowIndex);
+    });
+    setProductionEditCell(null);
+  };
+
+  const handleInsertSiteManagerRowAfter = (rowIndex: number) => {
+    setEditableSiteManagers((prev) => {
+      const next = [...prev];
+      next.splice(rowIndex + 1, 0, createEmptySiteManagerRow());
+      return next;
+    });
+    setSiteManagerEditCell(null);
+  };
+
+  const handleRemoveSiteManagerRowAt = (rowIndex: number) => {
+    setEditableSiteManagers((prev) => {
+      if (prev.length <= 1) return [createEmptySiteManagerRow()];
+      return prev.filter((_, i) => i !== rowIndex);
+    });
+    setSiteManagerEditCell(null);
+  };
+
+  const handleInsertMaterialRowAfter = (rowIndex: number) => {
+    setEditableMaterials((prev) => {
+      const next = [...prev];
+      next.splice(rowIndex + 1, 0, createEmptyMaterialRow());
+      return next;
+    });
+    setMaterialEditCell(null);
+  };
+
+  const handleRemoveMaterialRowAt = (rowIndex: number) => {
+    setEditableMaterials((prev) => {
+      if (prev.length <= 1) return [createEmptyMaterialRow()];
+      return prev.filter((_, i) => i !== rowIndex);
+    });
+    setMaterialEditCell(null);
+  };
+
+  const handleInsertEnergyRowAfter = (rowIndex: number) => {
+    setEditableEnergyInfo((prev) => {
+      const next = [...prev];
+      next.splice(rowIndex + 1, 0, createEmptyEnergyRow());
+      return next;
+    });
+    setEnergyEditCell(null);
+  };
+
+  const handleRemoveEnergyRowAt = (rowIndex: number) => {
+    setEditableEnergyInfo((prev) => {
+      if (prev.length <= 1) return [createEmptyEnergyRow()];
+      return prev.filter((_, i) => i !== rowIndex);
+    });
+    setEnergyEditCell(null);
+  };
+
+  const formatProductionValue = (value: any) => {
+    if (value === null || value === undefined) return '';
+    if (typeof value === 'number') return Number.isFinite(value) ? value.toLocaleString() : String(value);
+    return String(value);
+  };
+
+  const renderProductionValueContent = (rowIndex: number, field: string, value: any) => {
+    if (!isTabEditable(7)) return formatProductionValue(value);
+
+    const editing =
+      productionEditCell?.rowIndex === rowIndex && productionEditCell?.field === field;
+
+    if (!editing) {
+      return (
+        <div className={cellShellClass} style={{ color: 'var(--aifix-navy)' }}>
+          <span
+            className="min-w-0 flex-1 cursor-default truncate"
+            onDoubleClick={() =>
+              setProductionEditCell({
+                rowIndex,
+                field,
+                snapshot: value,
+              })
+            }
+            title="더블클릭하여 수정"
+          >
+            {formatProductionValue(value) || '\u00a0'}
+          </span>
+        </div>
+      );
+    }
+
+    const snapshot = productionEditCell?.snapshot;
+
+    return (
+      <div className={`${cellShellClass} outline-none ring-2 ring-inset ring-[var(--aifix-primary)]`}>
+        <input
+          autoFocus
+          value={String(value ?? '')}
+          onChange={(e) => {
+            const raw = e.target.value;
+            const nextValue = typeof value === 'number' ? Number(raw || 0) : raw;
+            setEditableProductionRows((prev) =>
+              prev.map((r, i) => (i === rowIndex ? { ...r, [field]: nextValue } : r)),
+            );
+          }}
+          onBlur={() => setProductionEditCell(null)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              setEditableProductionRows((prev) =>
+                prev.map((r, i) =>
+                  i === rowIndex ? { ...r, [field]: snapshot } : r,
+                ),
+              );
+              setProductionEditCell(null);
+              return;
+            }
+            if (e.key === 'Enter') {
+              (e.target as HTMLInputElement).blur();
+            }
+          }}
+          className="m-0 h-full min-h-0 w-full min-w-0 flex-1 appearance-none border-0 bg-transparent p-0 text-sm text-[var(--aifix-navy)] outline-none"
+        />
+      </div>
+    );
+  };
+
+  const renderSiteManagerValueContent = (
+    rowIndex: number,
+    field: 'department' | 'position' | 'name' | 'email' | 'phone',
+    value: any,
+  ) => {
+    if (!isTabEditable(4)) return safeValue(value);
+
+    const editing = siteManagerEditCell?.rowIndex === rowIndex && siteManagerEditCell?.field === field;
+
+    if (!editing) {
+      return (
+        <div className={cellShellClass} style={{ color: 'var(--aifix-navy)' }}>
+          <span
+            className="min-w-0 flex-1 cursor-default truncate"
+            onDoubleClick={() => setSiteManagerEditCell({ rowIndex, field, snapshot: value })}
+            title="더블클릭하여 수정"
+          >
+            {String(value ?? '') || '\u00a0'}
+          </span>
+        </div>
+      );
+    }
+
+    const snapshot = siteManagerEditCell?.snapshot;
+    return (
+      <div className={`${cellShellClass} outline-none ring-2 ring-inset ring-[var(--aifix-primary)]`}>
+        <input
+          autoFocus
+          value={String(value ?? '')}
+          onChange={(e) => {
+            const next = e.target.value;
+            setEditableSiteManagers((prev) =>
+              prev.map((r, i) => (i === rowIndex ? { ...r, [field]: next } : r)),
+            );
+          }}
+          onBlur={() => setSiteManagerEditCell(null)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              setEditableSiteManagers((prev) =>
+                prev.map((r, i) => (i === rowIndex ? { ...r, [field]: snapshot } : r)),
+              );
+              setSiteManagerEditCell(null);
+              return;
+            }
+            if (e.key === 'Enter') {
+              (e.target as HTMLInputElement).blur();
+            }
+          }}
+          className="m-0 h-full min-h-0 w-full min-w-0 flex-1 appearance-none border-0 bg-transparent p-0 text-sm text-[var(--aifix-navy)] outline-none"
+        />
+      </div>
+    );
+  };
+
+  const renderMaterialValueContent = (
+    rowIndex: number,
+    field:
+      | 'processName'
+      | 'inputMaterialName'
+      | 'inputAmount'
+      | 'inputAmountUnit'
+      | 'materialEmissionFactor'
+      | 'materialEmissionFactorUnit'
+      | 'mineralType'
+      | 'mineralAmount'
+      | 'mineralOrigin'
+      | 'mineralEmissionFactor'
+      | 'mineralEmissionFactorUnit',
+    value: any,
+  ) => {
+    if (!isTabEditable(5)) return safeValue(value);
+
+    const editing = materialEditCell?.rowIndex === rowIndex && materialEditCell?.field === field;
+
+    if (!editing) {
+      return (
+        <div className={cellShellClass} style={{ color: 'var(--aifix-navy)' }}>
+          <span
+            className="min-w-0 flex-1 cursor-default truncate"
+            onDoubleClick={() => setMaterialEditCell({ rowIndex, field, snapshot: value })}
+            title="더블클릭하여 수정"
+          >
+            {String(value ?? '') || '\u00a0'}
+          </span>
+        </div>
+      );
+    }
+
+    const snapshot = materialEditCell?.snapshot;
+    return (
+      <div className={`${cellShellClass} outline-none ring-2 ring-inset ring-[var(--aifix-primary)]`}>
+        <input
+          autoFocus
+          value={String(value ?? '')}
+          onChange={(e) => {
+            const next = e.target.value;
+            setEditableMaterials((prev) =>
+              prev.map((r, i) => (i === rowIndex ? { ...r, [field]: next } : r)),
+            );
+          }}
+          onBlur={() => setMaterialEditCell(null)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              setEditableMaterials((prev) =>
+                prev.map((r, i) => (i === rowIndex ? { ...r, [field]: snapshot } : r)),
+              );
+              setMaterialEditCell(null);
+              return;
+            }
+            if (e.key === 'Enter') {
+              (e.target as HTMLInputElement).blur();
+            }
+          }}
+          className="m-0 h-full min-h-0 w-full min-w-0 flex-1 appearance-none border-0 bg-transparent p-0 text-sm text-[var(--aifix-navy)] outline-none"
+        />
+      </div>
+    );
+  };
+
+  const renderEnergyValueContent = (
+    rowIndex: number,
+    field:
+      | 'processName'
+      | 'energyType'
+      | 'energyUsage'
+      | 'energyUnit'
+      | 'emissionFactor'
+      | 'emissionFactorUnit',
+    value: any,
+  ) => {
+    if (!isTabEditable(6)) return safeValue(value);
+
+    const editing = energyEditCell?.rowIndex === rowIndex && energyEditCell?.field === field;
+
+    if (!editing) {
+      return (
+        <div className={cellShellClass} style={{ color: 'var(--aifix-navy)' }}>
+          <span
+            className="min-w-0 flex-1 cursor-default truncate"
+            onDoubleClick={() => setEnergyEditCell({ rowIndex, field, snapshot: value })}
+            title="더블클릭하여 수정"
+          >
+            {String(value ?? '') || '\u00a0'}
+          </span>
+        </div>
+      );
+    }
+
+    const snapshot = energyEditCell?.snapshot;
+    return (
+      <div className={`${cellShellClass} outline-none ring-2 ring-inset ring-[var(--aifix-primary)]`}>
+        <input
+          autoFocus
+          value={String(value ?? '')}
+          onChange={(e) => {
+            const raw = e.target.value;
+            const nextValue =
+              field === 'energyUsage' || field === 'emissionFactor' ? Number(raw || 0) : raw;
+            setEditableEnergyInfo((prev) =>
+              prev.map((r, i) => (i === rowIndex ? { ...r, [field]: nextValue } : r)),
+            );
+          }}
+          onBlur={() => setEnergyEditCell(null)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              setEditableEnergyInfo((prev) =>
+                prev.map((r, i) => (i === rowIndex ? { ...r, [field]: snapshot } : r)),
+              );
+              setEnergyEditCell(null);
+              return;
+            }
+            if (e.key === 'Enter') {
+              (e.target as HTMLInputElement).blur();
+            }
+          }}
+          className="m-0 h-full min-h-0 w-full min-w-0 flex-1 appearance-none border-0 bg-transparent p-0 text-sm text-[var(--aifix-navy)] outline-none"
+        />
+      </div>
+    );
   };
 
   useEffect(() => {
@@ -517,7 +1264,7 @@ export default function Tier0Detail() {
 
   const renderTabContent = () => {
     switch (activeTab) {
-      case 0: // 기업 및 조직 식별 정보
+      case 0: // 납품 정보
         return (
           <div>
             <div className="flex items-center justify-between mb-4">
@@ -536,52 +1283,27 @@ export default function Tier0Detail() {
                 </thead>
                 <tbody>
                   <tr className="bg-white">
-                    <td className="px-4 py-3 text-sm border font-medium text-gray-600">회사명</td>
-                    <td className="px-4 py-3 text-sm border">{company.organizationInfo.companyName}</td>
+                    <td className="px-4 py-3 text-sm border font-medium text-gray-600">납품 제품</td>
+                    <td className="px-4 py-3 text-sm border">{company.productType}</td>
                   </tr>
                   <tr className="bg-gray-50">
-                    <td className="px-4 py-3 text-sm border font-medium text-gray-600">사업자 등록번호</td>
-                    <td className="px-4 py-3 text-sm border">{company.organizationInfo.businessRegistrationNumber}</td>
+                    <td className="px-4 py-3 text-sm border font-medium text-gray-600">납품량</td>
+                    <td className="px-4 py-3 text-sm border">{company.deliveryVolume.toLocaleString()} EA</td>
                   </tr>
                   <tr className="bg-white">
-                    <td className="px-4 py-3 text-sm border font-medium text-gray-600">국가 소재지</td>
-                    <td className="px-4 py-3 text-sm border">{company.organizationInfo.country}</td>
-                  </tr>
-                  <tr className="bg-gray-50">
-                    <td className="px-4 py-3 text-sm border font-medium text-gray-600">상세주소</td>
-                    <td className="px-4 py-3 text-sm border">{company.organizationInfo.address}</td>
-                  </tr>
-                  <tr className="bg-white">
-                    <td className="px-4 py-3 text-sm border font-medium text-gray-600">부서명</td>
-                    <td className="px-4 py-3 text-sm border">{company.organizationInfo.department}</td>
-                  </tr>
-                  <tr className="bg-gray-50">
-                    <td className="px-4 py-3 text-sm border font-medium text-gray-600">DUNS Number</td>
-                    <td className="px-4 py-3 text-sm border">{company.organizationInfo.dunsNumber}</td>
-                  </tr>
-                  <tr className="bg-white">
-                    <td className="px-4 py-3 text-sm border font-medium text-gray-600">텍스 ID</td>
-                    <td className="px-4 py-3 text-sm border">{company.organizationInfo.taxId}</td>
-                  </tr>
-                  <tr className="bg-gray-50">
-                    <td className="px-4 py-3 text-sm border font-medium text-gray-600">공식 홈페이지 주소</td>
+                    <td className="px-4 py-3 text-sm border font-medium text-gray-600">PCF 결과</td>
                     <td className="px-4 py-3 text-sm border">
-                      <a href={company.organizationInfo.website} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
-                        {company.organizationInfo.website}
-                      </a>
+                      {company.pcfResult !== null
+                        ? `부분산정 ${company.pcfResult.toLocaleString()} kg CO₂e`
+                        : '부분산정 N/A'}
+                      {pcfFinalValue !== null
+                        ? ` · 최종 ${pcfFinalValue.toLocaleString()} kg CO₂e`
+                        : ' · 최종 미산정 (하위차 데이터 부족)'}
                     </td>
                   </tr>
-                  <tr className="bg-white">
-                    <td className="px-4 py-3 text-sm border font-medium text-gray-600">대표자명</td>
-                    <td className="px-4 py-3 text-sm border">{company.organizationInfo.ceoName}</td>
-                  </tr>
                   <tr className="bg-gray-50">
-                    <td className="px-4 py-3 text-sm border font-medium text-gray-600">대표 이메일</td>
-                    <td className="px-4 py-3 text-sm border">{company.organizationInfo.ceoEmail}</td>
-                  </tr>
-                  <tr className="bg-white">
-                    <td className="px-4 py-3 text-sm border font-medium text-gray-600">대표자 연락처</td>
-                    <td className="px-4 py-3 text-sm border">{company.organizationInfo.ceoPhone}</td>
+                    <td className="px-4 py-3 text-sm border font-medium text-gray-600">상태</td>
+                    <td className="px-4 py-3 text-sm border">{company.status}</td>
                   </tr>
                 </tbody>
               </table>
@@ -599,40 +1321,30 @@ export default function Tier0Detail() {
               </div>
             </div>
             <div className="overflow-x-auto">
-              <table className="w-full border-collapse">
-                <thead className="bg-gray-100">
+              <table className={SUP_DETAIL_TABLE_EDITABLE}>
+                <thead>
                   <tr>
-                    <th className="px-3 py-3 text-left text-sm font-semibold text-gray-700 border">종사업장번호</th>
-                    <th className="px-3 py-3 text-left text-sm font-semibold text-gray-700 border">사업장명</th>
-                    <th className="px-3 py-3 text-left text-sm font-semibold text-gray-700 border">국가 소재지</th>
-                    <th className="px-3 py-3 text-left text-sm font-semibold text-gray-700 border">상세주소</th>
-                    <th className="px-3 py-3 text-left text-sm font-semibold text-gray-700 border">대표자명</th>
-                    <th className="px-3 py-3 text-left text-sm font-semibold text-gray-700 border">대표 이메일</th>
-                    <th className="px-3 py-3 text-left text-sm font-semibold text-gray-700 border">대표자 연락처</th>
-                    <th className="px-3 py-3 text-left text-sm font-semibold text-gray-700 border">공정명</th>
-                    <th className="px-3 py-3 text-left text-sm font-semibold text-gray-700 border">신재생 에너지</th>
-                    <th className="px-3 py-3 text-left text-sm font-semibold text-gray-700 border">���경 인증</th>
+                    <th className={SUP_DETAIL_TH}>사업장명</th>
+                    <th className={SUP_DETAIL_TH}>사업자등록번호</th>
+                    <th className={SUP_DETAIL_TH}>종사업장번호</th>
+                    <th className={SUP_DETAIL_TH}>국가 소재지</th>
+                    <th className={SUP_DETAIL_TH}>상세주소</th>
+                    <th className={SUP_DETAIL_TH}>대표자명</th>
+                    <th className={SUP_DETAIL_TH}>대표 이메일</th>
+                    <th className={SUP_DETAIL_TH}>대표 연락처</th>
                   </tr>
                 </thead>
                 <tbody>
                   {company.siteInfo.map((site, idx) => (
-                    <tr key={site.siteId} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
-                      <td className="px-3 py-3 text-sm border">{site.siteId}</td>
-                      <td className="px-3 py-3 text-sm border">{site.siteName}</td>
-                      <td className="px-3 py-3 text-sm border">{site.country}</td>
-                      <td className="px-3 py-3 text-sm border">{site.address}</td>
-                      <td className="px-3 py-3 text-sm border">{site.managerName}</td>
-                      <td className="px-3 py-3 text-sm border">{site.managerEmail}</td>
-                      <td className="px-3 py-3 text-sm border">{site.managerPhone}</td>
-                      <td className="px-3 py-3 text-sm border">{site.processName}</td>
-                      <td className="px-3 py-3 text-sm border">
-                        {site.renewableEnergy ? (
-                          <span className="text-green-600">사용</span>
-                        ) : (
-                          <span className="text-gray-400">미사용</span>
-                        )}
-                      </td>
-                      <td className="px-3 py-3 text-sm border">{site.environmentalCertification}</td>
+                    <tr key={site.siteId} className="hover:bg-gray-50 transition-colors">
+                      <td className={SUP_DETAIL_TD}>{site.siteName}</td>
+                      <td className={SUP_DETAIL_TD}>{company.organizationInfo.businessRegistrationNumber}</td>
+                      <td className={SUP_DETAIL_TD}>{site.siteId}</td>
+                      <td className={SUP_DETAIL_TD}>{site.country}</td>
+                      <td className={SUP_DETAIL_TD}>{site.address}</td>
+                      <td className={SUP_DETAIL_TD}>{site.managerName}</td>
+                      <td className={SUP_DETAIL_TD}>{site.managerEmail}</td>
+                      <td className={SUP_DETAIL_TD}>{site.managerPhone}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -641,34 +1353,202 @@ export default function Tier0Detail() {
           </div>
         );
       
-      case 2: // 자재 및 품목
+      case 5: // 자재 정보
         return (
-          <div>
+          <div className="flex flex-col">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2 text-sm text-gray-600">
-                <Lock className="w-4 h-4" />
-                <span>🔗 Source : ERP / MES Interface | Data Sync : 자동 연동</span>
+                {isTabEditable(5) ? (
+                  <>
+                    <FileText className="w-4 h-4" />
+                    <span>✏ Factory Input Data (수정 가능)</span>
+                  </>
+                ) : (
+                  <>
+                    <Lock className="w-4 h-4" />
+                    <span>🔗 Source : ERP / MES Interface | Data Sync : 자동 연동</span>
+                  </>
+                )}
               </div>
+              {isTabEditable(5) && (
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleExcelUpload}
+                    className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 cursor-pointer transition-colors flex items-center gap-2"
+                  >
+                    <Upload className="w-4 h-4" />
+                    파일 업로드
+                  </button>
+                  <button
+                    onClick={handleAddRow}
+                    className="px-4 py-2 text-sm text-white rounded-lg flex items-center gap-2 transition-all cursor-pointer"
+                    style={{
+                      background: 'linear-gradient(90deg, #5B3BFA 0%, #00B4FF 100%)',
+                    }}
+                  >
+                    <Plus className="w-4 h-4" />
+                    + 행추가
+                  </button>
+                  <button
+                    onClick={handleSave}
+                    className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors flex items-center gap-2"
+                  >
+                    <Save className="w-4 h-4" />
+                    수정 완료
+                  </button>
+                </div>
+              )}
             </div>
-            <div className="overflow-x-auto">
-              <table className="w-full border-collapse">
-                <thead className="bg-gray-100">
+
+            <div className="min-h-[28rem] sm:min-h-[32rem] overflow-x-auto overflow-y-visible border border-gray-200 rounded-xl bg-white [scrollbar-gutter:stable]">
+              <table className={SUP_DETAIL_TABLE_EDITABLE}>
+                <thead>
                   <tr>
-                    <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700 border">자재ID</th>
-                    <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700 border">자재명</th>
-                    <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700 border">기본 단위</th>
-                    <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700 border">HS 코드</th>
-                    <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700 border">배출계수(EF) ID</th>
+                    <th className={SUP_DETAIL_TH}>세부제품명</th>
+                    <th className={SUP_DETAIL_TH}>공정명</th>
+                    <th className={SUP_DETAIL_TH}>투입 자재명</th>
+                    <th className={SUP_DETAIL_TH}>투입량</th>
+                    <th className={SUP_DETAIL_TH}>투입량 단위</th>
+                    <th className={SUP_DETAIL_TH}>자재 배출계수</th>
+                    <th className={SUP_DETAIL_TH}>자재 배출계수 단위</th>
+                    <th className={SUP_DETAIL_TH}>투입 광물 종류</th>
+                    <th className={SUP_DETAIL_TH}>투입 광물량</th>
+                    <th className={SUP_DETAIL_TH}>광물 원산지</th>
+                    <th className={SUP_DETAIL_TH}>광물 배출계수</th>
+                    <th className={SUP_DETAIL_TH}>광물 배출계수 단위</th>
+                    {isTabEditable(5) && <th className={SUP_DETAIL_TH_ACTION}>작업</th>}
                   </tr>
                 </thead>
                 <tbody>
-                  {company.materialInfo.map((material, idx) => (
-                    <tr key={material.materialId} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
-                      <td className="px-4 py-3 text-sm border">{material.materialId}</td>
-                      <td className="px-4 py-3 text-sm border">{material.materialName}</td>
-                      <td className="px-4 py-3 text-sm border">{material.unit}</td>
-                      <td className="px-4 py-3 text-sm border">{material.hsCode}</td>
-                      <td className="px-4 py-3 text-sm border">{material.emissionFactorId}</td>
+                  {editableMaterials.map((row, idx) => (
+                    <tr key={row.rowId ?? idx} className="group hover:bg-gray-50 transition-colors">
+                      <td className={SUP_DETAIL_TD}>{detailProductName}</td>
+                      <td className={SUP_DETAIL_TD}>
+                        {isTabEditable(5) ? (
+                          <SearchableSelectCreatable
+                            value={row.processName}
+                            onChange={(v) =>
+                              setEditableMaterials((prev) =>
+                                prev.map((r, i) => (i === idx ? { ...r, processName: v } : r)),
+                              )
+                            }
+                            baseOptions={processNameOptions}
+                            placeholder="공정명 검색·추가"
+                          />
+                        ) : safeValue(row.processName)}
+                      </td>
+                      <td className={SUP_DETAIL_TD}>
+                        {isTabEditable(5) ? (
+                          <SearchableSelectCreatable
+                            value={row.inputMaterialName}
+                            onChange={(v) =>
+                              setEditableMaterials((prev) =>
+                                prev.map((r, i) => (i === idx ? { ...r, inputMaterialName: v } : r)),
+                              )
+                            }
+                            baseOptions={materialNameBaseOptions}
+                            placeholder="투입 자재명 검색·추가"
+                          />
+                        ) : safeValue(row.inputMaterialName)}
+                      </td>
+                      <td className={SUP_DETAIL_TD}>{renderMaterialValueContent(idx, 'inputAmount', row.inputAmount)}</td>
+                      <td className={SUP_DETAIL_TD}>
+                        {isTabEditable(5) ? (
+                          <SearchableSelectCreatable
+                            value={row.inputAmountUnit}
+                            onChange={(v) =>
+                              setEditableMaterials((prev) =>
+                                prev.map((r, i) => (i === idx ? { ...r, inputAmountUnit: v } : r)),
+                              )
+                            }
+                            baseOptions={unitBaseOptions}
+                            placeholder="투입량 단위 검색·추가"
+                          />
+                        ) : safeValue(row.inputAmountUnit)}
+                      </td>
+                      <td className={SUP_DETAIL_TD}>{renderMaterialValueContent(idx, 'materialEmissionFactor', row.materialEmissionFactor)}</td>
+                      <td className={SUP_DETAIL_TD}>
+                        {isTabEditable(5) ? (
+                          <SearchableSelectCreatable
+                            value={row.materialEmissionFactorUnit}
+                            onChange={(v) =>
+                              setEditableMaterials((prev) =>
+                                prev.map((r, i) => (i === idx ? { ...r, materialEmissionFactorUnit: v } : r)),
+                              )
+                            }
+                            baseOptions={materialEfUnitBaseOptions}
+                            placeholder="자재 배출계수 단위 검색·추가"
+                          />
+                        ) : safeValue(row.materialEmissionFactorUnit)}
+                      </td>
+                      <td className={SUP_DETAIL_TD}>
+                        {isTabEditable(5) ? (
+                          <SearchableSelectCreatable
+                            value={row.mineralType}
+                            onChange={(v) =>
+                              setEditableMaterials((prev) =>
+                                prev.map((r, i) => (i === idx ? { ...r, mineralType: v } : r)),
+                              )
+                            }
+                            baseOptions={mineralTypeBaseOptions}
+                            placeholder="투입 광물 종류 검색·추가"
+                          />
+                        ) : safeValue(row.mineralType)}
+                      </td>
+                      <td className={SUP_DETAIL_TD}>{renderMaterialValueContent(idx, 'mineralAmount', row.mineralAmount)}</td>
+                      <td className={SUP_DETAIL_TD}>
+                        {isTabEditable(5) ? (
+                          <SearchableSelectStrict
+                            value={row.mineralOrigin}
+                            onChange={(v) =>
+                              setEditableMaterials((prev) =>
+                                prev.map((r, i) => (i === idx ? { ...r, mineralOrigin: v } : r)),
+                              )
+                            }
+                            options={mineralOriginOptions}
+                            placeholder="광물 원산지 검색"
+                          />
+                        ) : safeValue(row.mineralOrigin)}
+                      </td>
+                      <td className={SUP_DETAIL_TD}>{renderMaterialValueContent(idx, 'mineralEmissionFactor', row.mineralEmissionFactor)}</td>
+                      <td className={SUP_DETAIL_TD}>
+                        {isTabEditable(5) ? (
+                          <SearchableSelectCreatable
+                            value={row.mineralEmissionFactorUnit}
+                            onChange={(v) =>
+                              setEditableMaterials((prev) =>
+                                prev.map((r, i) => (i === idx ? { ...r, mineralEmissionFactorUnit: v } : r)),
+                              )
+                            }
+                            baseOptions={mineralEfUnitBaseOptions}
+                            placeholder="광물 배출계수 단위 검색·추가"
+                          />
+                        ) : safeValue(row.mineralEmissionFactorUnit)}
+                      </td>
+                      {isTabEditable(5) && (
+                        <td className={SUP_DETAIL_TD_ACTION}>
+                          <div className="flex h-8 items-center justify-end gap-0.5">
+                            <button
+                              type="button"
+                              onClick={() => handleInsertMaterialRowAfter(idx)}
+                              className="inline-flex items-center justify-center rounded-lg p-2 text-gray-500 hover:bg-gray-100 transition-colors"
+                              title="이 행 아래에 새 행 추가"
+                              aria-label="이 행 아래에 새 행 추가"
+                            >
+                              <Plus className="w-4 h-4" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveMaterialRowAt(idx)}
+                              className="inline-flex items-center justify-center rounded-lg p-2 text-gray-500 hover:bg-red-50 hover:text-red-600 transition-colors"
+                              title="이 행 삭제"
+                              aria-label="이 행 삭제"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
@@ -677,7 +1557,7 @@ export default function Tier0Detail() {
           </div>
         );
       
-      case 3: // 주요설비정보
+      case 3: // 설비 정보
         return (
           <div>
             <div className="flex items-center justify-between mb-4">
@@ -687,28 +1567,139 @@ export default function Tier0Detail() {
               </div>
             </div>
             <div className="overflow-x-auto">
-              <table className="w-full border-collapse">
-                <thead className="bg-gray-100">
+              <table className={SUP_DETAIL_TABLE_EDITABLE}>
+                <thead>
                   <tr>
-                    <th className="px-3 py-3 text-left text-sm font-semibold text-gray-700 border">공정명</th>
-                    <th className="px-3 py-3 text-left text-sm font-semibold text-gray-700 border">주요 설비 번호</th>
-                    <th className="px-3 py-3 text-left text-sm font-semibold text-gray-700 border">설비명</th>
-                    <th className="px-3 py-3 text-left text-sm font-semibold text-gray-700 border">시간당 최대 정격출력</th>
-                    <th className="px-3 py-3 text-left text-sm font-semibold text-gray-700 border">시간당 표준 생산량</th>
-                    <th className="px-3 py-3 text-left text-sm font-semibold text-gray-700 border">설비 도입 연도</th>
-                    <th className="px-3 py-3 text-left text-sm font-semibold text-gray-700 border">사용 에너지 종류</th>
+                    <th className={SUP_DETAIL_TH}>사업장명</th>
+                    <th className={SUP_DETAIL_TH}>설비유형</th>
+                    <th className={SUP_DETAIL_TH}>공정명</th>
+                    <th className={SUP_DETAIL_TH}>설비명</th>
+                    <th className={SUP_DETAIL_TH}>설비 고유 번호</th>
                   </tr>
                 </thead>
                 <tbody>
                   {company.facilityInfo.map((facility, idx) => (
-                    <tr key={facility.facilityNumber} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
-                      <td className="px-3 py-3 text-sm border">{facility.processName}</td>
-                      <td className="px-3 py-3 text-sm border">{facility.facilityNumber}</td>
-                      <td className="px-3 py-3 text-sm border">{facility.facilityName}</td>
-                      <td className="px-3 py-3 text-sm border">{facility.maxOutput}</td>
-                      <td className="px-3 py-3 text-sm border">{facility.standardProduction}</td>
-                      <td className="px-3 py-3 text-sm border">{facility.installationYear}</td>
-                      <td className="px-3 py-3 text-sm border">{facility.energyType}</td>
+                    <tr key={facility.facilityNumber} className="hover:bg-gray-50 transition-colors">
+                      <td className={SUP_DETAIL_TD}>{company.siteInfo?.[0]?.siteName ?? '-'}</td>
+                      <td className={SUP_DETAIL_TD}>{facility.energyType ?? '-'}</td>
+                      <td className={SUP_DETAIL_TD}>{facility.processName}</td>
+                      <td className={SUP_DETAIL_TD}>{facility.facilityName}</td>
+                      <td className={SUP_DETAIL_TD}>{facility.facilityNumber}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        );
+
+      case 4: // 사업장 담당자 정보 (Editable for ESG)
+        return (
+          <div className="flex flex-col">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2 text-sm text-gray-600">
+                {isTabEditable(4) ? (
+                  <>
+                    <FileText className="w-4 h-4" />
+                    <span>✏ Factory Input Data (수정 가능)</span>
+                  </>
+                ) : (
+                  <>
+                    <Lock className="w-4 h-4" />
+                    <span>🔗 Source : ERP / MES Interface | Data Sync : 자동 연동</span>
+                  </>
+                )}
+              </div>
+
+              {isTabEditable(4) && (
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleExcelUpload}
+                    className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 cursor-pointer transition-colors flex items-center gap-2"
+                  >
+                    <Upload className="w-4 h-4" />
+                    파일 업로드
+                  </button>
+                  <button
+                    onClick={handleAddRow}
+                    className="px-4 py-2 text-sm text-white rounded-lg flex items-center gap-2 transition-all cursor-pointer"
+                    style={{
+                      background: 'linear-gradient(90deg, #5B3BFA 0%, #00B4FF 100%)',
+                    }}
+                  >
+                    <Plus className="w-4 h-4" />
+                    + 행추가
+                  </button>
+                  <button
+                    onClick={handleSave}
+                    className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors flex items-center gap-2"
+                  >
+                    <Save className="w-4 h-4" />
+                    수정 완료
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <div className="min-h-[28rem] sm:min-h-[32rem] overflow-x-auto overflow-y-visible border border-gray-200 rounded-xl bg-white [scrollbar-gutter:stable]">
+              <table className={SUP_DETAIL_TABLE_EDITABLE}>
+                <thead>
+                  <tr>
+                    <th className={SUP_DETAIL_TH}>사업장명(원천시스템에서 인터페이스)</th>
+                    <th className={SUP_DETAIL_TH}>부서명</th>
+                    <th className={SUP_DETAIL_TH}>직급 및 직책</th>
+                    <th className={SUP_DETAIL_TH}>이름</th>
+                    <th className={SUP_DETAIL_TH}>이메일</th>
+                    <th className={SUP_DETAIL_TH}>연락처</th>
+                    {isTabEditable(4) && <th className={SUP_DETAIL_TH_ACTION}>작업</th>}
+                  </tr>
+                </thead>
+                <tbody>
+                  {editableSiteManagers.map((row, idx) => (
+                    <tr key={row.rowId ?? idx} className="group hover:bg-gray-50 transition-colors">
+                      <td className={SUP_DETAIL_TD}>
+                        {isTabEditable(4) ? (
+                          <SearchableSelectStrict
+                            value={row.siteName}
+                            onChange={(v) =>
+                              setEditableSiteManagers((prev) =>
+                                prev.map((r, i) => (i === idx ? { ...r, siteName: v } : r)),
+                              )
+                            }
+                            options={siteNameOptions}
+                            placeholder="사업장명 검색"
+                          />
+                        ) : safeValue(row.siteName)}
+                      </td>
+                      <td className={SUP_DETAIL_TD}>{renderSiteManagerValueContent(idx, 'department', row.department)}</td>
+                      <td className={SUP_DETAIL_TD}>{renderSiteManagerValueContent(idx, 'position', row.position)}</td>
+                      <td className={SUP_DETAIL_TD}>{renderSiteManagerValueContent(idx, 'name', row.name)}</td>
+                      <td className={`${SUP_DETAIL_TD} min-w-[240px] whitespace-normal break-all`}>{renderSiteManagerValueContent(idx, 'email', row.email)}</td>
+                      <td className={`${SUP_DETAIL_TD} min-w-[180px] whitespace-normal break-words`}>{renderSiteManagerValueContent(idx, 'phone', row.phone)}</td>
+                      {isTabEditable(4) && (
+                        <td className={SUP_DETAIL_TD_ACTION}>
+                          <div className="flex h-8 items-center justify-end gap-0.5">
+                            <button
+                              type="button"
+                              onClick={() => handleInsertSiteManagerRowAfter(idx)}
+                              className="inline-flex items-center justify-center rounded-lg p-2 text-gray-500 hover:bg-gray-100 transition-colors"
+                              title="이 행 아래에 새 행 추가"
+                              aria-label="이 행 아래에 새 행 추가"
+                            >
+                              <Plus className="w-4 h-4" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveSiteManagerRowAt(idx)}
+                              className="inline-flex items-center justify-center rounded-lg p-2 text-gray-500 hover:bg-red-50 hover:text-red-600 transition-colors"
+                              title="이 행 삭제"
+                              aria-label="이 행 삭제"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
@@ -717,12 +1708,170 @@ export default function Tier0Detail() {
           </div>
         );
       
-      case 4: // 공정 활동 데이터 (Editable)
+      case 6: // 에너지 정보 (Editable for ESG)
+        return (
+          <div className="flex flex-col">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2 text-sm text-gray-600">
+                {isTabEditable(6) ? (
+                  <>
+                    <FileText className="w-4 h-4" />
+                    <span>✏ Factory Input Data (수정 가능)</span>
+                  </>
+                ) : (
+                  <>
+                    <Lock className="w-4 h-4" />
+                    <span>🔗 Source : ERP / MES Interface | Data Sync : 자동 연동</span>
+                  </>
+                )}
+              </div>
+
+              {isTabEditable(6) && (
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleExcelUpload}
+                    className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 cursor-pointer transition-colors flex items-center gap-2"
+                  >
+                    <Upload className="w-4 h-4" />
+                    파일 업로드
+                  </button>
+                  <button
+                    onClick={handleAddRow}
+                    className="px-4 py-2 text-sm text-white rounded-lg flex items-center gap-2 transition-all cursor-pointer"
+                    style={{
+                      background: 'linear-gradient(90deg, #5B3BFA 0%, #00B4FF 100%)',
+                    }}
+                  >
+                    <Plus className="w-4 h-4" />
+                    + 행추가
+                  </button>
+                  <button
+                    onClick={handleSave}
+                    className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors flex items-center gap-2"
+                  >
+                    <Save className="w-4 h-4" />
+                    수정 완료
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <div className="min-h-[28rem] sm:min-h-[32rem] overflow-x-auto overflow-y-visible border border-gray-200 rounded-xl bg-white [scrollbar-gutter:stable]">
+              <table className={SUP_DETAIL_TABLE_EDITABLE}>
+                <thead>
+                  <tr>
+                    <th className={SUP_DETAIL_TH}>세부제품명</th>
+                    <th className={SUP_DETAIL_TH}>공정명</th>
+                    <th className={SUP_DETAIL_TH}>에너지 유형</th>
+                    <th className={SUP_DETAIL_TH}>에너지 사용량</th>
+                    <th className={SUP_DETAIL_TH}>에너지 단위</th>
+                    <th className={SUP_DETAIL_TH}>에너지 배출계수</th>
+                    <th className={SUP_DETAIL_TH}>에너지 배출계수 단위</th>
+                    {isTabEditable(6) && <th className={SUP_DETAIL_TH_ACTION}>작업</th>}
+                  </tr>
+                </thead>
+                <tbody>
+                  {editableEnergyInfo.map((row, idx) => (
+                    <tr key={row.rowId ?? idx} className="group hover:bg-gray-50 transition-colors">
+                      <td className={SUP_DETAIL_TD}>{detailProductName}</td>
+                      <td className={SUP_DETAIL_TD}>
+                        {isTabEditable(6) ? (
+                          <SearchableSelectCreatable
+                            value={row.processName}
+                            onChange={(v) =>
+                              setEditableEnergyInfo((prev) =>
+                                prev.map((r, i) => (i === idx ? { ...r, processName: v } : r)),
+                              )
+                            }
+                            baseOptions={processNameOptions}
+                            placeholder="공정명 검색·추가"
+                          />
+                        ) : (
+                          safeValue(row.processName)
+                        )}
+                      </td>
+                      <td className={SUP_DETAIL_TD}>
+                        {isTabEditable(6) ? (
+                          <SearchableSelectCreatable
+                            value={row.energyType}
+                            onChange={(v) =>
+                              setEditableEnergyInfo((prev) =>
+                                prev.map((r, i) => (i === idx ? { ...r, energyType: v } : r)),
+                              )
+                            }
+                            baseOptions={energyTypeBaseOptions}
+                            placeholder="에너지 유형 검색·추가"
+                          />
+                        ) : safeValue(row.energyType)}
+                      </td>
+                      <td className={SUP_DETAIL_TD}>{renderEnergyValueContent(idx, 'energyUsage', row.energyUsage)}</td>
+                      <td className={SUP_DETAIL_TD}>
+                        {isTabEditable(6) ? (
+                          <SearchableSelectCreatable
+                            value={row.energyUnit}
+                            onChange={(v) =>
+                              setEditableEnergyInfo((prev) =>
+                                prev.map((r, i) => (i === idx ? { ...r, energyUnit: v } : r)),
+                              )
+                            }
+                            baseOptions={unitBaseOptions}
+                            placeholder="에너지 단위 검색·추가"
+                          />
+                        ) : safeValue(row.energyUnit)}
+                      </td>
+                      <td className={SUP_DETAIL_TD}>{renderEnergyValueContent(idx, 'emissionFactor', row.emissionFactor)}</td>
+                      <td className={SUP_DETAIL_TD}>
+                        {isTabEditable(6) ? (
+                          <SearchableSelectCreatable
+                            value={row.emissionFactorUnit}
+                            onChange={(v) =>
+                              setEditableEnergyInfo((prev) =>
+                                prev.map((r, i) => (i === idx ? { ...r, emissionFactorUnit: v } : r)),
+                              )
+                            }
+                            baseOptions={energyEfUnitBaseOptions}
+                            placeholder="배출계수 단위 검색·추가"
+                          />
+                        ) : safeValue(row.emissionFactorUnit)}
+                      </td>
+                      {isTabEditable(6) && (
+                        <td className={SUP_DETAIL_TD_ACTION}>
+                          <div className="flex h-8 items-center justify-end gap-0.5">
+                            <button
+                              type="button"
+                              onClick={() => handleInsertEnergyRowAfter(idx)}
+                              className="inline-flex items-center justify-center rounded-lg p-2 text-gray-500 hover:bg-gray-100 transition-colors"
+                              title="이 행 아래에 새 행 추가"
+                              aria-label="이 행 아래에 새 행 추가"
+                            >
+                              <Plus className="w-4 h-4" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveEnergyRowAt(idx)}
+                              className="inline-flex items-center justify-center rounded-lg p-2 text-gray-500 hover:bg-red-50 hover:text-red-600 transition-colors"
+                              title="이 행 삭제"
+                              aria-label="이 행 삭제"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </td>
+                      )}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        );
+
+      case 7: // 생산 정보 (Editable)
         return (
           <div className="flex flex-col">
               <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-2 text-sm text-gray-600">
-                  {isTabEditable(4) ? (
+                  {isTabEditable(7) ? (
                     <>
                       <FileText className="w-4 h-4" />
                       <span>✏ Factory Input Data (수정 가능)</span>
@@ -734,21 +1883,14 @@ export default function Tier0Detail() {
                     </>
                   )}
                 </div>
-                {isTabEditable(4) && (
+                {isTabEditable(7) && (
                   <div className="flex items-center gap-2">
-                    <button
-                      onClick={handleExcelDownload}
-                      className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors flex items-center gap-2"
-                    >
-                      <Download className="w-4 h-4" />
-                      Excel 다운로드
-                    </button>
                     <button
                       onClick={handleExcelUpload}
                       className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 cursor-pointer transition-colors flex items-center gap-2"
                     >
                       <Upload className="w-4 h-4" />
-                      Excel 업로드
+                      파일 업로드
                     </button>
                     <button
                       onClick={handleAddRow}
@@ -758,80 +1900,85 @@ export default function Tier0Detail() {
                       }}
                     >
                       <Plus className="w-4 h-4" />
-                      행 추가
+                      + 행추가
                     </button>
                     <button
                       onClick={handleSave}
                       className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors flex items-center gap-2"
                     >
                       <Save className="w-4 h-4" />
-                      저장
+                      수정 완료
                     </button>
                   </div>
                 )}
               </div>
 
-              <div className="min-h-[500px] overflow-auto border border-gray-200 rounded-lg">
-                <table className="w-full border-collapse">
-                  <thead className={isTabEditable(4) ? "bg-gradient-to-r from-[#5B3BFA] to-[#00B4FF] text-white sticky top-0" : "bg-gray-100 sticky top-0"}>
+              <div className="min-h-[28rem] sm:min-h-[32rem] overflow-x-auto overflow-y-visible border border-gray-200 rounded-xl bg-white [scrollbar-gutter:stable]">
+                <table className={SUP_DETAIL_TABLE_EDITABLE}>
+                  <thead>
                     <tr>
-                      <th className={`px-2 py-3 text-left text-xs font-semibold border ${isTabEditable(4) ? 'border-blue-400' : 'text-gray-700'}`}>공정명</th>
-                      <th className={`px-2 py-3 text-left text-xs font-semibold border ${isTabEditable(4) ? 'border-blue-400' : 'text-gray-700'}`}>투입 자재 카테고리</th>
-                      <th className={`px-2 py-3 text-left text-xs font-semibold border ${isTabEditable(4) ? 'border-blue-400' : 'text-gray-700'}`}>투입자재명</th>
-                      <th className={`px-2 py-3 text-left text-xs font-semibold border ${isTabEditable(4) ? 'border-blue-400' : 'text-gray-700'}`}>투입자재량</th>
-                      <th className={`px-2 py-3 text-left text-xs font-semibold border ${isTabEditable(4) ? 'border-blue-400' : 'text-gray-700'}`}>투입 수량 단위</th>
-                      <th className={`px-2 py-3 text-left text-xs font-semibold border ${isTabEditable(4) ? 'border-blue-400' : 'text-gray-700'}`}>자재 재활용 비율(%)</th>
-                      <th className={`px-2 py-3 text-left text-xs font-semibold border ${isTabEditable(4) ? 'border-blue-400' : 'text-gray-700'}`}>투입 에너지 유형</th>
-                      <th className={`px-2 py-3 text-left text-xs font-semibold border ${isTabEditable(4) ? 'border-blue-400' : 'text-gray-700'}`}>에너지 사용량</th>
-                      <th className={`px-2 py-3 text-left text-xs font-semibold border ${isTabEditable(4) ? 'border-blue-400' : 'text-gray-700'}`}>에너지 단위</th>
-                      <th className={`px-2 py-3 text-left text-xs font-semibold border ${isTabEditable(4) ? 'border-blue-400' : 'text-gray-700'}`}>운송유형</th>
-                      <th className={`px-2 py-3 text-left text-xs font-semibold border ${isTabEditable(4) ? 'border-blue-400' : 'text-gray-700'}`}>운송수단</th>
-                      <th className={`px-2 py-3 text-left text-xs font-semibold border ${isTabEditable(4) ? 'border-blue-400' : 'text-gray-700'}`}>제품 표준 중량</th>
-                      <th className={`px-2 py-3 text-left text-xs font-semibold border ${isTabEditable(4) ? 'border-blue-400' : 'text-gray-700'}`}>순중량 실측치</th>
-                      <th className={`px-2 py-3 text-left text-xs font-semibold border ${isTabEditable(4) ? 'border-blue-400' : 'text-gray-700'}`}>산출물(양품)</th>
-                      <th className={`px-2 py-3 text-left text-xs font-semibold border ${isTabEditable(4) ? 'border-blue-400' : 'text-gray-700'}`}>손실량(Scrap)</th>
-                      <th className={`px-2 py-3 text-left text-xs font-semibold border ${isTabEditable(4) ? 'border-blue-400' : 'text-gray-700'}`}>산출 폐기물</th>
-                      <th className={`px-2 py-3 text-left text-xs font-semibold border ${isTabEditable(4) ? 'border-blue-400' : 'text-gray-700'}`}>배출계수</th>
-                      {isTabEditable(4) && (
-                        <th className="px-2 py-3 text-center text-xs font-semibold border border-blue-400">액션</th>
-                      )}
+                      <th className={SUP_DETAIL_TH}>세부제품명</th>
+                      <th className={SUP_DETAIL_TH}>사업장명</th>
+                      <th className={SUP_DETAIL_TH}>생산량</th>
+                      <th className={SUP_DETAIL_TH}>생산량 단위</th>
+                      <th className={SUP_DETAIL_TH}>폐기물량</th>
+                      <th className={SUP_DETAIL_TH}>폐기물 배출계수</th>
+                      <th className={SUP_DETAIL_TH}>폐기물 배출계수 단위</th>
+                      {isTabEditable(7) && <th className={SUP_DETAIL_TH_ACTION}>작업</th>}
                     </tr>
                   </thead>
                   <tbody>
-                    {allActivityData.length > 0 ? (
-                      allActivityData.map((perf, idx) => (
-                        <tr key={perf.id} className={idx % 2 === 0 ? 'bg-white' : (isTabEditable(4) ? 'bg-blue-50' : 'bg-gray-50')}>
-                          <td className="px-2 py-2 text-sm border font-medium">{perf.processName}</td>
-                          <td className="px-2 py-2 text-sm border">{perf.materialCategory}</td>
-                          <td className="px-2 py-2 text-sm border">{perf.materialName}</td>
-                          <td className="px-2 py-2 text-sm border text-right">{perf.materialQuantity.toLocaleString()}</td>
-                          <td className="px-2 py-2 text-sm border">{perf.quantityUnit}</td>
-                          <td className="px-2 py-2 text-sm border text-right">{perf.recyclingRatio}</td>
-                          <td className="px-2 py-2 text-sm border">{perf.energyType}</td>
-                          <td className="px-2 py-2 text-sm border text-right">{perf.energyUsage.toLocaleString()}</td>
-                          <td className="px-2 py-2 text-sm border">{perf.energyUnit}</td>
-                          <td className="px-2 py-2 text-sm border">{perf.transportType}</td>
-                          <td className="px-2 py-2 text-sm border">{perf.transportMode}</td>
-                          <td className="px-2 py-2 text-sm border text-right">{perf.standardWeight}</td>
-                          <td className="px-2 py-2 text-sm border text-right">{perf.actualWeight}</td>
-                          <td className="px-2 py-2 text-sm border text-right">{perf.output.toLocaleString()}</td>
-                          <td className="px-2 py-2 text-sm border text-right">{perf.scrap.toLocaleString()}</td>
-                          <td className="px-2 py-2 text-sm border text-right">{perf.waste.toLocaleString()}</td>
-                          <td className="px-2 py-2 text-sm border text-right">{perf.emissionFactor}</td>
-                          {isTabEditable(4) && (
-                            <td className="px-2 py-2 text-sm border">
-                              <div className="flex items-center justify-center gap-1">
+                    {(editableProductionRows ?? []).length > 0 ? (
+                      editableProductionRows.map((row, idx) => (
+                        <tr key={row.rowId ?? idx} className="group hover:bg-gray-50 transition-colors">
+                          <td className={SUP_DETAIL_TD}>{detailProductName}</td>
+                          <td className={SUP_DETAIL_TD}>
+                            {isTabEditable(7) ? (
+                              <select
+                                value={row.siteName ?? ''}
+                                onChange={(e) =>
+                                  setEditableProductionRows((prev) =>
+                                    prev.map((r, i) => (i === idx ? { ...r, siteName: e.target.value } : r)),
+                                  )
+                                }
+                                className="w-full px-2 py-1 border border-gray-300 rounded"
+                              >
+                                <option value="">선택</option>
+                                {siteNameOptions.map((siteName) => (
+                                  <option key={siteName} value={siteName}>
+                                    {siteName}
+                                  </option>
+                                ))}
+                              </select>
+                            ) : (
+                              safeValue(row.siteName)
+                            )}
+                          </td>
+                          <td className={SUP_DETAIL_TD}>{renderProductionValueContent(idx, 'productionAmount', row.productionAmount)}</td>
+                          <td className={SUP_DETAIL_TD}>{renderProductionValueContent(idx, 'productionUnit', row.productionUnit)}</td>
+                          <td className={SUP_DETAIL_TD}>{renderProductionValueContent(idx, 'wasteAmount', row.wasteAmount)}</td>
+                          <td className={SUP_DETAIL_TD}>{renderProductionValueContent(idx, 'wasteEmissionFactor', row.wasteEmissionFactor)}</td>
+                          <td className={SUP_DETAIL_TD}>{renderProductionValueContent(idx, 'wasteEmissionFactorUnit', row.wasteEmissionFactorUnit)}</td>
+                          {isTabEditable(7) && (
+                            <td className={SUP_DETAIL_TD_ACTION}>
+                              <div className="flex h-8 items-center justify-end gap-0.5">
                                 <button
-                                  onClick={() => toast.info('수정 기능을 준비 중입니다')}
-                                  className="p-1 hover:bg-gray-200 rounded transition-colors"
+                                  type="button"
+                                  onClick={() => handleInsertProductionRowAfter(idx)}
+                                  className="inline-flex items-center justify-center rounded-lg p-2 text-gray-500 hover:bg-gray-100 transition-colors"
+                                  title="이 행 아래에 새 행 추가"
+                                  aria-label="이 행 아래에 새 행 추가"
                                 >
-                                  <Edit2 className="w-4 h-4 text-blue-600" />
+                                  <Plus className="w-4 h-4" />
                                 </button>
                                 <button
-                                  onClick={() => toast.info('삭제 기능을 준비 중입니다')}
-                                  className="p-1 hover:bg-gray-200 rounded transition-colors"
+                                  type="button"
+                                  onClick={() => handleRemoveProductionRowAt(idx)}
+                                  className="inline-flex items-center justify-center rounded-lg p-2 text-gray-500 hover:bg-red-50 hover:text-red-600 transition-colors"
+                                  title="이 행 삭제"
+                                  aria-label="이 행 삭제"
                                 >
-                                  <Trash2 className="w-4 h-4 text-red-600" />
+                                  <Trash2 className="w-4 h-4" />
                                 </button>
                               </div>
                             </td>
@@ -840,8 +1987,8 @@ export default function Tier0Detail() {
                       ))
                     ) : (
                       <tr>
-                        <td colSpan={isTabEditable(4) ? 18 : 17} className="px-4 py-8 text-center text-gray-500">
-                          공정 활동 데이터가 없습니다.
+                        <td colSpan={isTabEditable(7) ? 8 : 7} className="px-4 py-8 text-center text-gray-500">
+                          생산 정보가 없습니다.
                         </td>
                       </tr>
                     )}
@@ -851,7 +1998,7 @@ export default function Tier0Detail() {
           </div>
         );
       
-      case 5: // 담당자 정보
+      case 2: // 담당자 정보 (구매/ESG)
         return (
           <div>
             <div className="flex items-center justify-between mb-4">
@@ -866,7 +2013,7 @@ export default function Tier0Detail() {
                   <tr>
                     <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700 border">사번</th>
                     <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700 border">부서명</th>
-                    <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700 border">직급</th>
+                    <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700 border">직급 및 직책</th>
                     <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700 border">이름</th>
                     <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700 border">이메일</th>
                     <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700 border">연락처</th>
@@ -934,45 +2081,95 @@ export default function Tier0Detail() {
                 <span className="px-3 py-1 bg-purple-100 text-purple-700 rounded-full text-sm font-semibold">
                   {company.companyType} (원청사)
                 </span>
-                <span className="px-3 py-1 bg-blue-100 text-blue-700 rounded-full text-sm font-semibold">
-                  {company.tier}
-                </span>
               </div>
-              <div className="grid grid-cols-3 gap-4 text-sm">
-                <div className="flex items-center gap-2">
-                  <MapPin className="w-4 h-4 text-gray-400" />
-                  <span className="text-gray-600">국가:</span>
-                  <span className="font-medium">{company.country}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Package className="w-4 h-4 text-gray-400" />
-                  <span className="text-gray-600">납품 제품:</span>
-                  <span className="font-medium">{company.productType}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <TrendingUp className="w-4 h-4 text-gray-400" />
-                  <span className="text-gray-600">납품량:</span>
-                  <span className="font-medium">{company.deliveryVolume.toLocaleString()} EA</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <TrendingUp className="w-4 h-4 text-gray-400" />
-                  <span className="text-gray-600">PCF 결과:</span>
-                  <span className="font-medium">
-                    {company.pcfResult ? `${company.pcfResult.toLocaleString()} kg CO₂e` : 'N/A'}
+
+              {/* Inline KPI: PCF (박스 없음, 레이아웃 부담 최소) */}
+              <div className="mt-1">
+                <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                  <span className="text-sm text-gray-500">PCF 결과</span>
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="text-xl font-semibold tabular-nums text-gray-900 sm:text-2xl">
+                      {pcfPrimaryKpiValue !== null ? pcfPrimaryKpiValue.toLocaleString() : '-'}
+                    </span>
+                    {pcfFinalValue === null && (
+                      <span
+                        className="inline-flex shrink-0 text-amber-500"
+                        title="최종 PCF 미산정 (하위차 데이터 부족)"
+                        role="img"
+                        aria-label="최종 PCF 미산정, 하위차 데이터 부족 주의"
+                      >
+                        <AlertTriangle className="h-5 w-5 sm:h-6 sm:w-6" strokeWidth={2} aria-hidden />
+                      </span>
+                    )}
                   </span>
+                  <span className="text-sm text-gray-600">kg CO₂e</span>
                 </div>
-                <div className="flex items-center gap-2">
-                  {company.status === 'Verified' ? (
-                    <CheckCircle className="w-4 h-4 text-green-600" />
-                  ) : (
-                    <AlertTriangle className="w-4 h-4 text-yellow-600" />
-                  )}
-                  <span className="text-gray-600">상태:</span>
-                  <span className={`font-medium ${
-                    company.status === 'Verified' ? 'text-green-600' : 'text-yellow-600'
-                  }`}>
-                    {company.status}
-                  </span>
+                <p className="mt-1 text-xs text-gray-400">
+                  부분산정 {pcfPartialValue !== null ? `${pcfPartialValue.toLocaleString()} kg CO₂e` : '-'} · 최종{' '}
+                  {pcfFinalValue !== null
+                    ? `${pcfFinalValue.toLocaleString()} kg CO₂e`
+                    : '미산정 (하위차 데이터 부족)'}
+                </p>
+              </div>
+
+              {/* 메타: 4열 — 고객·지사 | 납품 | 제품·BOM | 계약·조회 월 (라벨-값 간격 축소) */}
+              <div className="mt-6 grid w-full grid-cols-1 gap-x-3 gap-y-6 text-sm lg:grid-cols-4 lg:gap-x-3 lg:items-start">
+                <div className="min-w-0 space-y-2.5">
+                  {[
+                    { label: '고객사', value: customerLabel || '-', title: customerLabel || '-' },
+                    { label: '지사', value: branchLabel || '-', title: branchLabel || '-' },
+                  ].map((row) => (
+                    <div key={row.label} className="flex min-w-0 gap-1.5">
+                      <span className="w-20 shrink-0 text-gray-500">{row.label}</span>
+                      <span className="min-w-0 flex-1 font-semibold text-gray-900 break-words" title={row.title}>
+                        {row.value}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                <div className="min-w-0 space-y-2.5">
+                  {[
+                    { label: '납품일', value: deliveryDateLabel, title: deliveryDateLabel },
+                    {
+                      label: '납품량',
+                      value: `${company.deliveryVolume.toLocaleString()} ${deliveryUnit}`,
+                      title: `${company.deliveryVolume.toLocaleString()} ${deliveryUnit}`,
+                    },
+                  ].map((row) => (
+                    <div key={row.label} className="flex min-w-0 gap-1.5">
+                      <span className="w-20 shrink-0 text-gray-500">{row.label}</span>
+                      <span className="min-w-0 flex-1 font-semibold text-gray-900 break-words" title={row.title}>
+                        {row.value}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                <div className="min-w-0 space-y-2.5">
+                  {[
+                    { label: '제품', value: productLabel || '-', title: productLabel || '-' },
+                    { label: '세부제품', value: detailProductLabel || '-', title: detailProductLabel || '-' },
+                    { label: 'M-BOM', value: mBomLabel || '-', title: mBomLabel || '-' },
+                  ].map((row) => (
+                    <div key={row.label} className="flex min-w-0 gap-1.5">
+                      <span className="w-20 shrink-0 text-gray-500">{row.label}</span>
+                      <span className="min-w-0 flex-1 font-semibold text-gray-900 break-words" title={row.title}>
+                        {row.value}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                <div className="min-w-0 space-y-2.5">
+                  {[
+                    { label: '계약기간', value: contractPeriodLabel, title: contractPeriodLabel },
+                    { label: '조회 월', value: yearMonthLabel, title: yearMonthLabel },
+                  ].map((row) => (
+                    <div key={row.label} className="flex min-w-0 gap-1.5">
+                      <span className="w-20 shrink-0 text-gray-500">{row.label}</span>
+                      <span className="min-w-0 flex-1 font-semibold text-gray-900 break-words" title={row.title}>
+                        {row.value}
+                      </span>
+                    </div>
+                  ))}
                 </div>
               </div>
             </div>
@@ -1009,32 +2206,39 @@ export default function Tier0Detail() {
         }}
       >
         {/* Tab Headers */}
-        <div className="border-b border-gray-200">
-          <div className="flex overflow-x-auto">
+        <div className="p-6 pb-0">
+          <div className="flex gap-2 border-b border-gray-200 mb-6 overflow-x-auto">
             {tabs.map((tab) => (
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id)}
-                className={`px-6 py-4 text-sm font-medium whitespace-nowrap transition-colors relative ${
-                  activeTab === tab.id
-                    ? 'text-[#5B3BFA] border-b-2 border-[#5B3BFA]'
-                    : 'text-gray-600 hover:text-gray-900'
-                }`}
+                className="px-6 py-4 border-b-2 transition-all duration-200 whitespace-nowrap"
+                style={{
+                  borderBottomColor: activeTab === tab.id ? 'var(--aifix-primary)' : 'transparent',
+                  color: activeTab === tab.id ? 'var(--aifix-primary)' : 'var(--aifix-gray)',
+                  fontWeight: activeTab === tab.id ? 600 : 400,
+                  backgroundColor: 'white',
+                }}
               >
-                <div className="flex items-center gap-2">
+                <span className="inline-flex items-center gap-2">
                   {tab.name}
-                  {!isTabEditable(tab.id) && <Lock className="w-3 h-3 text-gray-400" />}
-                </div>
+                  {!isTabEditable(tab.id) && <Lock className="w-3 h-3 opacity-60" />}
+                </span>
               </button>
             ))}
           </div>
         </div>
 
         {/* Tab Content */}
-        <div className="p-6">
+        <div className="px-6 pb-6 pt-0">
           {renderTabContent()}
         </div>
       </div>
+      <datalist id="tier0-process-options">
+        {processNameOptions.map((name) => (
+          <option key={name} value={name} />
+        ))}
+      </datalist>
 
       {/* Excel Upload Modal */}
       {showUploadModal && (

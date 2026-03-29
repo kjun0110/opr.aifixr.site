@@ -1,15 +1,24 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { Calendar, ChevronLeft, ChevronRight, X } from 'lucide-react';
 
 interface MonthRangePickerProps {
   startMonth: string | null; // Format: "2025-01"
-  endMonth: string | null;   // Format: "2025-12"
+  endMonth: string | null; // Format: "2025-12"
   onChange: (start: string | null, end: string | null) => void;
   error?: string;
   disabled?: boolean;
+  /** 계약기간 등 허용 월만 선택 가능 (YYYY-MM). 미지정 시 전체 월 선택 가능 */
+  enabledMonths?: string[];
 }
 
-export default function MonthRangePicker({ startMonth, endMonth, onChange, error, disabled }: MonthRangePickerProps) {
+export default function MonthRangePicker({
+  startMonth,
+  endMonth,
+  onChange,
+  error,
+  disabled,
+  enabledMonths,
+}: MonthRangePickerProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
   const [tempStartMonth, setTempStartMonth] = useState<string | null>(startMonth);
@@ -19,12 +28,12 @@ export default function MonthRangePicker({ startMonth, endMonth, onChange, error
 
   const months = [
     'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
   ];
 
   const monthsKo = [
     '1월', '2월', '3월', '4월', '5월', '6월',
-    '7월', '8월', '9월', '10월', '11월', '12월'
+    '7월', '8월', '9월', '10월', '11월', '12월',
   ];
 
   // Close picker when clicking outside
@@ -55,6 +64,17 @@ export default function MonthRangePicker({ startMonth, endMonth, onChange, error
     return { year, month };
   };
 
+  const { minYear, maxYear } = useMemo(() => {
+    if (!enabledMonths || enabledMonths.length === 0) return { minYear: 2000, maxYear: 2100 };
+    const years = enabledMonths.map((m) => parseInt(m.split('-')[0], 10));
+    return { minYear: Math.min(...years), maxYear: Math.max(...years) };
+  }, [enabledMonths]);
+
+  const isMonthEnabled = (year: number, monthIndex: number) => {
+    if (!enabledMonths || enabledMonths.length === 0) return true;
+    return enabledMonths.includes(formatMonthKey(year, monthIndex));
+  };
+
   const getDisplayText = (): string => {
     if (!startMonth || !endMonth) {
       return '기간을 선택하세요';
@@ -62,11 +82,13 @@ export default function MonthRangePicker({ startMonth, endMonth, onChange, error
     const start = parseMonthKey(startMonth);
     const end = parseMonthKey(endMonth);
     if (!start || !end) return '기간을 선택하세요';
-    
+
     return `${start.year}년 ${start.month}월 ~ ${end.year}년 ${end.month}월`;
   };
 
   const handleMonthClick = (year: number, monthIndex: number) => {
+    if (!isMonthEnabled(year, monthIndex)) return;
+
     const monthKey = formatMonthKey(year, monthIndex);
 
     if (!tempStartMonth || tempEndMonth) {
@@ -129,14 +151,14 @@ export default function MonthRangePicker({ startMonth, endMonth, onChange, error
   const isMonthStart = (year: number, monthIndex: number): boolean => {
     if (!tempStartMonth) return false;
     const monthKey = formatMonthKey(year, monthIndex);
-    
+
     if (!tempEndMonth && !hoverMonth) {
       return monthKey === tempStartMonth;
     }
 
     const start = parseMonthKey(tempStartMonth);
     const end = tempEndMonth ? parseMonthKey(tempEndMonth) : (hoverMonth ? parseMonthKey(hoverMonth) : null);
-    
+
     if (!start || !end) return false;
 
     const startDate = new Date(start.year, start.month - 1);
@@ -153,7 +175,7 @@ export default function MonthRangePicker({ startMonth, endMonth, onChange, error
     const monthKey = formatMonthKey(year, monthIndex);
     const start = parseMonthKey(tempStartMonth);
     const end = tempEndMonth ? parseMonthKey(tempEndMonth) : (hoverMonth ? parseMonthKey(hoverMonth) : null);
-    
+
     if (!start || !end) return false;
 
     const startDate = new Date(start.year, start.month - 1);
@@ -175,13 +197,17 @@ export default function MonthRangePicker({ startMonth, endMonth, onChange, error
     setIsOpen(true);
     setTempStartMonth(startMonth);
     setTempEndMonth(endMonth);
-    
-    // Set current year to the start month's year or current year
-    if (startMonth) {
-      const parsed = parseMonthKey(startMonth);
-      if (parsed) {
-        setCurrentYear(parsed.year);
+
+    if (enabledMonths && enabledMonths.length > 0) {
+      if (startMonth && enabledMonths.includes(startMonth)) {
+        const parsed = parseMonthKey(startMonth);
+        if (parsed) setCurrentYear(parsed.year);
+      } else {
+        setCurrentYear(parseInt(enabledMonths[0].split('-')[0], 10));
       }
+    } else if (startMonth) {
+      const parsed = parseMonthKey(startMonth);
+      if (parsed) setCurrentYear(parsed.year);
     }
   };
 
@@ -227,15 +253,19 @@ export default function MonthRangePicker({ startMonth, endMonth, onChange, error
           {/* Year Navigation */}
           <div className="flex items-center justify-between p-4 border-b border-gray-200">
             <button
+              type="button"
               onClick={() => setCurrentYear(currentYear - 1)}
-              className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+              disabled={enabledMonths && enabledMonths.length > 0 && currentYear <= minYear}
+              className="p-2 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <ChevronLeft className="w-5 h-5 text-gray-600" />
             </button>
             <div className="text-lg font-bold text-gray-900">{currentYear}년</div>
             <button
+              type="button"
               onClick={() => setCurrentYear(currentYear + 1)}
-              className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+              disabled={enabledMonths && enabledMonths.length > 0 && currentYear >= maxYear}
+              className="p-2 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <ChevronRight className="w-5 h-5 text-gray-600" />
             </button>
@@ -246,15 +276,22 @@ export default function MonthRangePicker({ startMonth, endMonth, onChange, error
             {/* 3열 x 4행(12개월) 구조 */}
             <div className="grid grid-cols-3 gap-2">
               {months.map((month, index) => {
-                const isInRange = isMonthInRange(currentYear, index);
-                const isStart = isMonthStart(currentYear, index);
-                const isEnd = isMonthEnd(currentYear, index);
+                const enabled = isMonthEnabled(currentYear, index);
+                const isInRange = enabled && isMonthInRange(currentYear, index);
+                const isStart = enabled && isMonthStart(currentYear, index);
+                const isEnd = enabled && isMonthEnd(currentYear, index);
 
                 return (
                   <button
                     key={month}
+                    type="button"
+                    disabled={!enabled}
                     onClick={() => handleMonthClick(currentYear, index)}
                     onMouseEnter={() => {
+                      if (!enabled) {
+                        setHoverMonth(null);
+                        return;
+                      }
                       if (tempStartMonth && !tempEndMonth) {
                         setHoverMonth(formatMonthKey(currentYear, index));
                       }
@@ -262,15 +299,17 @@ export default function MonthRangePicker({ startMonth, endMonth, onChange, error
                     onMouseLeave={() => setHoverMonth(null)}
                     className={`
                       px-4 py-2 rounded-lg text-xs font-semibold transition-all
-                      ${isStart || isEnd
-                        ? 'text-white shadow-md'
-                        : isInRange
-                        ? 'bg-purple-100 text-[#5B3BFA]'
-                        : 'bg-gray-50 text-gray-700 hover:bg-gray-100'
+                      ${!enabled
+                        ? 'bg-gray-100 text-gray-400 cursor-not-allowed opacity-70'
+                        : isStart || isEnd
+                          ? 'text-white shadow-md'
+                          : isInRange
+                            ? 'bg-purple-100 text-[#5B3BFA]'
+                            : 'bg-gray-50 text-gray-700 hover:bg-gray-100'
                       }
                     `}
                     style={
-                      isStart || isEnd
+                      enabled && (isStart || isEnd)
                         ? {
                             background: 'linear-gradient(90deg, #5B3BFA 0%, #00B4FF 100%)',
                           }

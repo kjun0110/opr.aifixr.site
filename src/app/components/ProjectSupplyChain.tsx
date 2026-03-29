@@ -786,11 +786,16 @@ export default function ProjectSupplyChain() {
     }
     const nProj = Number(rProject);
     const nProd = Number(rPg);
+    const nVariant = Number(modalDetailProduct);
     if (!Number.isFinite(nProj) || !Number.isFinite(nProd)) {
       setModalSuppliers([]);
       setModalSuppliersLoading(false);
       return;
     }
+    const variantQuery =
+      Number.isFinite(nVariant) && nVariant >= 1
+        ? `?product_variant_id=${nVariant}`
+        : '';
     let cancelled = false;
     setModalSupplier('');
     setModalSuppliersLoading(true);
@@ -798,7 +803,7 @@ export default function ProjectSupplyChain() {
     void (async () => {
       try {
         const rows = await apiFetch<ApiSupplierBrief[]>(
-          `${SUPPLY_CHAIN_BASE}/project-supply-chain/projects/${nProj}/products/${nProd}/suppliers`,
+          `${SUPPLY_CHAIN_BASE}/project-supply-chain/projects/${nProj}/products/${nProd}/suppliers${variantQuery}`,
         );
         if (!cancelled) setModalSuppliers(rows);
       } catch (e) {
@@ -821,6 +826,7 @@ export default function ProjectSupplyChain() {
     modalBranch,
     modalProject,
     modalProductGroup,
+    modalDetailProduct,
     projectRows,
   ]);
 
@@ -1130,7 +1136,7 @@ export default function ProjectSupplyChain() {
           <button
             onClick={() => isProcurementView && openAddSupplierModal()}
             disabled={!isProcurementView}
-            title={!isProcurementView ? '1차 협력사 추가는 구매 관점에서만 사용할 수 있습니다' : undefined}
+            title={!isProcurementView ? '1차 협력사 추가는 구매 직무에서만 사용할 수 있습니다' : undefined}
             className="flex items-center gap-2 px-4 py-2 bg-white border-2 rounded-xl font-medium transition-all hover:bg-purple-50 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-white whitespace-nowrap"
             style={{
               borderColor: isProcurementView ? '#5B3BFA' : '#d1d5db',
@@ -1147,8 +1153,9 @@ export default function ProjectSupplyChain() {
           <div className="grid grid-cols-3 gap-4 mb-4">
             {/* Customer */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">고객사</label>
-              <p className="text-xs text-gray-500 mb-1.5">순서 무관 · 고객을 고르면 지사·제품 후보만 줄어듭니다.</p>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                고객사 <span style={{ color: '#EF4444' }}>*</span>
+              </label>
               <select
                 value={selectedCustomer}
                 onChange={(e) => setSelectedCustomer(e.target.value)}
@@ -1166,7 +1173,6 @@ export default function ProjectSupplyChain() {
             {/* Branch */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">세부 지사</label>
-              <p className="text-xs text-gray-500 mb-1.5">고객 미선택 시 &quot;고객명 · 지사명&quot;으로 표시됩니다.</p>
               <select
                 value={selectedBranchKey}
                 onChange={(e) => setSelectedBranchKey(e.target.value)}
@@ -1184,7 +1190,6 @@ export default function ProjectSupplyChain() {
             {/* Product */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">제품</label>
-              <p className="text-xs text-gray-500 mb-1.5">고객/지사를 고르면 목록이 좁혀집니다.</p>
               <select
                 value={selectedProductFilterCode}
                 onChange={(e) => setSelectedProductFilterCode(e.target.value)}
@@ -1253,10 +1258,10 @@ export default function ProjectSupplyChain() {
               {/* Project Info Badges (코드 기반) */}
               <div className="flex items-center gap-2 mb-4 flex-wrap">
                 <div className="px-3 py-1.5 rounded-lg text-xs font-medium" style={{ background: '#E9F5FF', color: '#2A64E0' }}>
-                  Customer: {selectedCustomer || '전체'}
+                  Customer: {selectedCustomer || '-'}
                 </div>
                 <div className="px-3 py-1.5 rounded-lg text-xs font-medium" style={{ background: '#E9F5FF', color: '#2A64E0' }}>
-                  Branch: {selectedBranchRow ? selectedBranchRow.branchName : '전체'}
+                  Branch: {selectedBranchKey !== 'ALL' && selectedBranchRow ? selectedBranchRow.branchName : '-'}
                 </div>
                 <div className="px-3 py-1.5 rounded-lg text-xs font-medium" style={{ background: '#E9F5FF', color: '#2A64E0' }}>
                   Product: {currentProductGroup.name}
@@ -1298,7 +1303,7 @@ export default function ProjectSupplyChain() {
                 <div className="flex items-center gap-3">
                   {/* Detail Product Selector (BOM 단위) - 제품 탭에 연동 */}
                   <div className="flex items-center gap-2">
-                    <label className="text-sm font-medium text-gray-700 whitespace-nowrap">세부제품 (BOM 단위)</label>
+                    <label className="text-sm font-medium text-gray-700 whitespace-nowrap">세부제품</label>
                     <select
                       value={selectedProductItemCode}
                       onChange={(e) => setSelectedProductItemCode(e.target.value)}
@@ -1435,7 +1440,7 @@ export default function ProjectSupplyChain() {
                     </select>
                   </div>
                   <div>
-                    <label className="block text-xs text-gray-600 mb-1">세부제품 (BOM 단위)</label>
+                    <label className="block text-xs text-gray-600 mb-1">세부제품</label>
                     <select
                       value={modalDetailProduct}
                       onChange={(e) => setModalDetailProduct(e.target.value)}
@@ -1487,9 +1492,14 @@ export default function ProjectSupplyChain() {
                     !modalSuppliersError &&
                     filteredSuppliers.length === 0 && (
                       <div className="px-4 py-3 text-sm text-gray-500">
-                        {modalCustomer && modalBranch && (modalProductGroup || modalProductGroups[0]?.id)
-                          ? '이 제품(opr_suppliers.product_id)에 등록된 SRM 협력사가 없습니다.'
-                          : '고객사·지사·제품을 선택하면 해당 제품에 묶인 협력사만 표시됩니다.'}
+                        {modalCustomer &&
+                        modalBranch &&
+                        (modalProductGroup || modalProductGroups[0]?.id) &&
+                        !modalDetailProduct
+                          ? '제품 기준 SRM 1차 후보입니다. 세부제품을 고르면 이 BOM에 아직 없는 협력사만으로 다시 좁혀집니다.'
+                          : modalCustomer && modalBranch && modalDetailProduct
+                            ? '이 BOM에 넣을 수 있는 SRM 1차 협력사가 없습니다. (이미 이 트리에 추가됨, 직하위 전용, 또는 미등록)'
+                            : '고객사·지사·제품을 선택하면 후보가 표시됩니다.'}
                       </div>
                     )}
                   {!modalSuppliersLoading &&

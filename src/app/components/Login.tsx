@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Building2, Mail, Lock } from 'lucide-react';
+import { restoreOprSessionFromCookie } from '@/lib/api/client';
 import {
   getOprGoogleLinkAuthUrl,
   loginOprAndStoreSession,
@@ -34,18 +35,8 @@ export default function Login() {
     setSubmitting(true);
     try {
       await loginOprAndStoreSession(email, password);
-      // DB 검증 후 동일 세션으로 Google OAuth 연동(게이트웨이 → KJ 저장)
-      try {
-        const authUrl = await getOprGoogleLinkAuthUrl();
-        window.location.assign(authUrl);
-      } catch (linkErr) {
-        setLoginError(
-          linkErr instanceof Error
-            ? `Google 연동 시작 실패: ${linkErr.message}`
-            : 'Google 연동 시작에 실패했습니다.',
-        );
-        router.push('/dashboard');
-      }
+      // Gmail OAuth는 호출하지 않음. 연동은 초대 발송 428 또는 아래 SSO 버튼에서만 진행.
+      router.push('/dashboard');
     } catch (err) {
       if (err instanceof OprLoginFailedError) {
         setLoginError(err.message);
@@ -59,15 +50,23 @@ export default function Login() {
     }
   };
 
+  /** 회사 Google 계정 연동(Gmail 발송). 리프레시 쿠키가 있으면 비밀번호 없이 진행 가능 */
   const handleSSOLogin = async () => {
     setLoginError(null);
     setSubmitting(true);
     try {
+      const restored = await restoreOprSessionFromCookie();
+      if (!restored) {
+        setLoginError(
+          'Google 연동을 시작하려면 먼저 이메일·비밀번호로 로그인해 주세요.',
+        );
+        return;
+      }
       const authUrl = await getOprGoogleLinkAuthUrl();
       window.location.assign(authUrl);
-    } catch {
+    } catch (e) {
       setLoginError(
-        'Google 연동을 시작하려면 먼저 이메일·비밀번호로 로그인해 주세요.',
+        e instanceof Error ? e.message : 'Google 연동을 시작할 수 없습니다.',
       );
     } finally {
       setSubmitting(false);
@@ -181,22 +180,23 @@ export default function Login() {
               {submitting ? '로그인 중…' : '로그인'}
             </button>
 
-            <button
-              type="button"
-              onClick={handleSSOLogin}
-              disabled={submitting}
-              className="w-full py-3 text-gray-700 font-medium border-2 border-gray-300 rounded-xl hover:bg-gray-50 transition-all disabled:opacity-50"
-              style={{ borderRadius: '14px' }}
-            >
-              회사 계정으로 로그인 (SSO)
-            </button>
-
             <div className="text-center">
               <a href="#" className="text-sm text-purple-600 hover:underline">
                 비밀번호 찾기
               </a>
             </div>
           </form>
+
+          {/* form 밖: 일부 환경에서 보조 버튼이 submit으로 처리되는 경우 방지 */}
+          <button
+            type="button"
+            onClick={handleSSOLogin}
+            disabled={submitting}
+            className="w-full mt-5 py-3 text-gray-700 font-medium border-2 border-gray-300 rounded-xl hover:bg-gray-50 transition-all disabled:opacity-50"
+            style={{ borderRadius: '14px' }}
+          >
+            회사 계정으로 로그인 (SSO)
+          </button>
 
           <p className="text-xs text-gray-500 mt-6 text-center">
             본 시스템은 원청사 구매직무 전용입니다

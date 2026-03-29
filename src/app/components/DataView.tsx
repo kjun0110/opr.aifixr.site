@@ -279,6 +279,53 @@ export default function DataView() {
     [detailProductOptions, selectedDetailProduct]
   );
 
+  /** 세부제품 행의 계약기간(projectPeriodStart~End)에 포함된 월만 월 선택 UI에서 활성화 */
+  const contractMonths = useMemo((): string[] | undefined => {
+    if (!selectedDetailMeta) return undefined;
+    const start = selectedDetailMeta.projectPeriodStart;
+    const end = selectedDetailMeta.projectPeriodEnd;
+    if (!start || !end || start > end) return [];
+    const [sy, sm] = start.split('-').map(Number);
+    const [ey, em] = end.split('-').map(Number);
+    const months: string[] = [];
+    let y = sy;
+    let m = sm;
+    while (y < ey || (y === ey && m <= em)) {
+      months.push(`${y}-${String(m).padStart(2, '0')}`);
+      m++;
+      if (m > 12) {
+        m = 1;
+        y++;
+      }
+    }
+    return months;
+  }, [selectedDetailMeta]);
+
+  // 세부제품·월 선택 모드: 조회 월 범위를 계약기간 안으로 보정
+  useEffect(() => {
+    if (!selectedDetailMeta || periodMode !== 'manual') return;
+    const months = contractMonths;
+    if (!months?.length) return;
+    const minM = months[0];
+    const maxM = months[months.length - 1];
+    let s = selectedPeriodStart;
+    let e = selectedPeriodEnd;
+    if (!s || !months.includes(s)) s = minM;
+    if (!e || !months.includes(e)) e = maxM;
+    if (s > e) {
+      const t = s;
+      s = e;
+      e = t;
+    }
+    if (s < minM) s = minM;
+    if (e > maxM) e = maxM;
+    if (s > e) e = s;
+    if (s !== selectedPeriodStart || e !== selectedPeriodEnd) {
+      setSelectedPeriodStart(s);
+      setSelectedPeriodEnd(e);
+    }
+  }, [selectedDetailMeta, periodMode, contractMonths, selectedPeriodStart, selectedPeriodEnd]);
+
   // Result cards: one per 세부제품. Blue card changes when detail product changes.
   const resultCards = useMemo((): DetailProductCard[] => {
     if (!selectedCustomer) return [];
@@ -301,7 +348,7 @@ export default function DataView() {
     let start: string | null;
     let end: string | null;
     if (selectedDetailProduct) {
-      // 세부제품 선택 시: 프로젝트 기간 사용 (auto면 selectedDetailMeta, manual이면 selectedPeriodStart/End)
+      // 세부제품 선택 시: 계약기간 사용 (auto면 selectedDetailMeta, manual이면 selectedPeriodStart/End)
       if (periodMode === 'auto' && selectedDetailMeta) {
         start = selectedDetailMeta.projectPeriodStart;
         end = selectedDetailMeta.projectPeriodEnd;
@@ -669,7 +716,7 @@ export default function DataView() {
   };
 
   // Unified render - simplified structure with 9 columns only (no horizontal scroll)
-  const renderNode = (node: DataNode, depth: number = 0) => {
+  const renderNode = (node: DataNode, depth: number = 0, parentNode?: DataNode | null) => {
     const isExpanded = expandedNodes.has(node.id);
     const hasChildren = node.children && node.children.length > 0;
     const isTier0 = node.tier === 'Tier 0';
@@ -790,6 +837,15 @@ export default function DataView() {
                   } catch {
                     // ignore
                   }
+                  try {
+                    const parentName =
+                      parentNode?.companyName && parentNode.companyName.trim()
+                        ? parentNode.companyName
+                        : '-';
+                    sessionStorage.setItem('aifix_data_view_selected_parent_company_v1', parentName);
+                  } catch {
+                    // ignore
+                  }
                   let route;
                   if (node.tier === 'Tier 0') {
                     route = `/dashboard/data-view/tier0/${node.id}`;
@@ -814,7 +870,7 @@ export default function DataView() {
         {/* Children */}
         {isExpanded && hasChildren && (
           <div className="transition-all duration-200">
-            {node.children!.map((child) => renderNode(child, depth + 1))}
+            {node.children!.map((child) => renderNode(child, depth + 1, node))}
           </div>
         )}
       </div>
@@ -1106,7 +1162,6 @@ export default function DataView() {
           <div>
             <label className="block text-sm font-medium mb-2">
               기간 선택 <span style={{ color: '#EF4444' }}>*</span>
-              <span className="block text-xs font-normal text-gray-500 mt-0.5">고객사·지사만 선택했을 때 조회 범위로 사용 (활성화 시 필수)</span>
             </label>
             <MonthRangePicker
               startMonth={generalPeriodStart}
@@ -1125,21 +1180,20 @@ export default function DataView() {
           <div>
             <div className="flex items-center justify-between mb-2">
               <label className="block text-sm font-medium">
-                프로젝트 기간 <span style={{ color: '#EF4444' }}>*</span>
-                <span className="block text-xs font-normal text-gray-500 mt-0.5">세부제품 선택 시 해당 제품 기간 (활성화 시 필수)</span>
+                계약기간 <span style={{ color: '#EF4444' }}>*</span>
               </label>
-              <div className="flex items-center gap-1 text-xs">
+              <div className="flex items-center gap-1.5 text-xs shrink-0">
                 <button
                   type="button"
                   onClick={() => { setPeriodMode('auto'); setHasQueried(false); }}
-                  className={`px-2 py-1 rounded-md border ${periodMode === 'auto' ? 'bg-purple-50 text-[#5B3BFA] border-[#5B3BFA]' : 'text-gray-600 border-gray-300'}`}
+                  className={`min-w-[52px] px-2.5 py-1 rounded-md border text-xs whitespace-nowrap leading-none ${periodMode === 'auto' ? 'bg-purple-50 text-[#5B3BFA] border-[#5B3BFA]' : 'text-gray-600 border-gray-300'}`}
                 >
                   자동
                 </button>
                 <button
                   type="button"
                   onClick={() => { setPeriodMode('manual'); setHasQueried(false); }}
-                  className={`px-2 py-1 rounded-md border ${periodMode === 'manual' ? 'bg-purple-50 text-[#5B3BFA] border-[#5B3BFA]' : 'text-gray-600 border-gray-300'}`}
+                  className={`min-w-[68px] px-2.5 py-1 rounded-md border text-xs whitespace-nowrap leading-none ${periodMode === 'manual' ? 'bg-purple-50 text-[#5B3BFA] border-[#5B3BFA]' : 'text-gray-600 border-gray-300'}`}
                 >
                   월 선택
                 </button>
@@ -1164,6 +1218,7 @@ export default function DataView() {
                   setHasQueried(false);
                 }}
                 error={periodError}
+                enabledMonths={contractMonths}
               />
             )}
           </div>

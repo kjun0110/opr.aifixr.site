@@ -1,6 +1,6 @@
  'use client';
 
-import { useState, useEffect } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { ArrowLeft, Building2, MapPin, Package, TrendingUp, CheckCircle, AlertTriangle, Download } from 'lucide-react';
 import { toast } from 'sonner';
@@ -279,11 +279,13 @@ export default function CompanyDetail() {
   
   // Tab definitions
   const supplierTabs = [
-    '기업 및 조직 식별 정보',
-    '사업장 정보',
-    '납품 제품 정보',
-    '생산 및 투입 실적',
+    '기업 기본정보',
     '담당자 정보',
+    '사업장 정보',
+    '생산(납품) 제품 정보',
+    '자재 정보',
+    '에너지 정보',
+    '운송 정보',
   ];
   
   const operatorTabs = [
@@ -295,6 +297,116 @@ export default function CompanyDetail() {
   ];
   
   const tabs = isOperator ? operatorTabs : supplierTabs;
+
+  const SUP_DETAIL_TABLE = 'w-full border-collapse border border-gray-300';
+  const SUP_DETAIL_TABLE_EDITABLE =
+    'w-full min-w-[1200px] table-fixed border-collapse border border-gray-300';
+  // 긴 문자열(공백 없는 이메일/코드/URL 등)도 옆 칸을 침범하지 않도록 셀 내부에서 줄바꿈/절단 처리
+  const SUP_DETAIL_TH =
+    'border border-gray-300 bg-[#F8F9FA] py-4 px-4 text-left align-middle text-sm font-semibold text-[var(--aifix-navy)] min-w-0 overflow-hidden whitespace-normal break-words';
+  const SUP_DETAIL_TD =
+    'border border-gray-300 py-4 px-4 align-top min-w-0 overflow-hidden whitespace-normal break-words';
+  const SUP_DETAIL_TD_LABEL =
+    'border border-gray-300 bg-[#F9FAFB] py-4 px-4 align-top text-sm font-medium text-[var(--aifix-gray)] min-w-0 overflow-hidden whitespace-normal break-words';
+
+  const Shell = ({ children }: { children: React.ReactNode }) => (
+    <div
+      className="bg-white rounded-[20px] overflow-x-hidden overflow-y-visible"
+      style={{ boxShadow: '0px 4px 16px rgba(0, 0, 0, 0.05)' }}
+    >
+      <div className="px-2 pb-8 pt-2">
+        <div className="min-h-[28rem] sm:min-h-[32rem] border border-gray-200 rounded-xl bg-white [scrollbar-gutter:stable] overflow-x-auto [overflow-y:visible]">
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+
+  const toYesNo = (v: boolean) => (v ? '해당' : '미해당');
+  const toRmi = (v: boolean) => (v ? '인증됨' : '미인증');
+  const safe = (v: unknown) => (v === null || v === undefined || v === '' ? '-' : String(v));
+
+  const facilitiesRows = useMemo(() => {
+    const reg = company.organizationInfo.businessRegistrationNumber;
+    return (company.siteInfo ?? []).map((s) => ({
+      registrationNumber: reg,
+      siteSubNumber: s.siteId,
+      name: s.siteName,
+      country: s.country,
+      address: s.address,
+      representative: s.managerName,
+      email: s.managerEmail,
+      phone: s.managerPhone,
+      rmiSmelter: toRmi(s.rmiSmelter),
+      feoc: toYesNo(s.feoc),
+    }));
+  }, [company.organizationInfo.businessRegistrationNumber, company.siteInfo]);
+
+  const productRows = useMemo(() => {
+    return (company.productInfo ?? []).map((p) => ({
+      name: p.productName,
+      origin: p.mineralOrigin,
+      deliveryDate: '-',
+      quantity: String(p.deliveryQuantity ?? '-'),
+      unit: p.unit,
+      standardWeight: String(p.standardWeight ?? '-'),
+      wasteQuantity: '-',
+      wasteEmissionFactor: '-',
+      wasteEmissionFactorUnit: '-',
+    }));
+  }, [company.productInfo]);
+
+  const materialRows = useMemo(() => {
+    // 최소 예시 1행: productionInfo 기반으로 채우거나 빈 값
+    const first = company.productionInfo?.[0];
+    return [
+      {
+        productName: safe(first?.targetProduct),
+        inputMaterialName: safe(first?.materialName),
+        inputAmount: safe(first?.materialQuantity),
+        inputAmountUnit: safe(first?.unit),
+        materialEmissionFactor: '-',
+        materialEmissionFactorUnit: '-',
+        mineralType: '-',
+        mineralAmount: '-',
+        mineralOrigin: '-',
+        mineralEmissionFactor: '-',
+        mineralEmissionFactorUnit: '-',
+      },
+    ];
+  }, [company.productionInfo]);
+
+  const energyRows = useMemo(() => {
+    const first = company.productionInfo?.[0];
+    return [
+      {
+        productName: safe(first?.targetProduct),
+        energyType: safe(first?.energyType),
+        energyUsage: safe(first?.energyUsage),
+        energyUnit: safe(first?.energyUnit),
+        emissionFactor: safe(first?.emissionFactor),
+        emissionFactorUnit: '-',
+      },
+    ];
+  }, [company.productionInfo]);
+
+  const transportRows = useMemo(() => {
+    const first = company.productionInfo?.[0];
+    return [
+      {
+        productName: safe(first?.targetProduct),
+        originCountry: safe(company.country),
+        originAddress: safe(company.organizationInfo.address),
+        destinationCountry: safe(company.country),
+        destinationAddress: safe(company.organizationInfo.address),
+        transportMethod: safe(first?.transportMode),
+        transportAmount: safe(company.deliveryVolume),
+        transportAmountUnit: 'kg',
+        emissionFactor: safe(first?.emissionFactor),
+        emissionFactorUnit: '-',
+      },
+    ];
+  }, [company.country, company.deliveryVolume, company.organizationInfo.address, company.productionInfo]);
   
   const handleExportExcel = () => {
     toast.success('Excel 파일을 다운로드합니다');
@@ -515,232 +627,285 @@ export default function CompanyDetail() {
     } else {
       // Supplier tabs
       switch (activeTab) {
-        case 0: // 기업 및 조직 식별 정보
+        case 0: // 기업 기본정보
           return (
-            <div className="overflow-x-auto">
-              <table className="w-full">
+            <Shell>
+              <table className={SUP_DETAIL_TABLE}>
                 <tbody>
-                  <tr className="border-b border-gray-200">
-                    <td className="px-4 py-3 bg-gray-50 font-medium text-sm w-1/3">회사명</td>
-                    <td className="px-4 py-3 text-sm">{company.organizationInfo.companyName}</td>
+                  <tr>
+                    <td className={SUP_DETAIL_TD_LABEL} style={{ width: '200px' }}>회사명</td>
+                    <td className={SUP_DETAIL_TD}>{safe(company.organizationInfo.companyName)}</td>
                   </tr>
-                  <tr className="border-b border-gray-200">
-                    <td className="px-4 py-3 bg-gray-50 font-medium text-sm">사업자 등록번호</td>
-                    <td className="px-4 py-3 text-sm">{company.organizationInfo.businessRegistrationNumber}</td>
+                  <tr>
+                    <td className={SUP_DETAIL_TD_LABEL}>사업자등록번호</td>
+                    <td className={SUP_DETAIL_TD}>{safe(company.organizationInfo.businessRegistrationNumber)}</td>
                   </tr>
-                  <tr className="border-b border-gray-200">
-                    <td className="px-4 py-3 bg-gray-50 font-medium text-sm">국가 소재지</td>
-                    <td className="px-4 py-3 text-sm">{company.organizationInfo.country}</td>
+                  <tr>
+                    <td className={SUP_DETAIL_TD_LABEL}>국가 소재지</td>
+                    <td className={SUP_DETAIL_TD}>{safe(company.organizationInfo.country)}</td>
                   </tr>
-                  <tr className="border-b border-gray-200">
-                    <td className="px-4 py-3 bg-gray-50 font-medium text-sm">상세 주소</td>
-                    <td className="px-4 py-3 text-sm">{company.organizationInfo.address}</td>
+                  <tr>
+                    <td className={SUP_DETAIL_TD_LABEL}>상세주소</td>
+                    <td className={SUP_DETAIL_TD}>{safe(company.organizationInfo.address)}</td>
                   </tr>
-                  <tr className="border-b border-gray-200">
-                    <td className="px-4 py-3 bg-gray-50 font-medium text-sm">DUNS Number</td>
-                    <td className="px-4 py-3 text-sm">{company.organizationInfo.dunsNumber}</td>
+                  <tr>
+                    <td className={SUP_DETAIL_TD_LABEL}>DUNS Number</td>
+                    <td className={SUP_DETAIL_TD}>{safe(company.organizationInfo.dunsNumber)}</td>
                   </tr>
-                  <tr className="border-b border-gray-200">
-                    <td className="px-4 py-3 bg-gray-50 font-medium text-sm">텍스 ID</td>
-                    <td className="px-4 py-3 text-sm">{company.organizationInfo.taxId}</td>
+                  <tr>
+                    <td className={SUP_DETAIL_TD_LABEL}>텍스 ID</td>
+                    <td className={SUP_DETAIL_TD}>{safe(company.organizationInfo.taxId)}</td>
                   </tr>
-                  <tr className="border-b border-gray-200">
-                    <td className="px-4 py-3 bg-gray-50 font-medium text-sm">공식 홈페이지 주소</td>
-                    <td className="px-4 py-3 text-sm">
-                      <a href={company.organizationInfo.website} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
-                        {company.organizationInfo.website}
+                  <tr>
+                    <td className={SUP_DETAIL_TD_LABEL}>공식 홈페이지 주소</td>
+                    <td className={SUP_DETAIL_TD}>
+                      <a
+                        href={company.organizationInfo.website}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{ color: 'var(--aifix-primary)', textDecoration: 'underline' }}
+                      >
+                        {safe(company.organizationInfo.website)}
                       </a>
                     </td>
                   </tr>
-                  <tr className="border-b border-gray-200">
-                    <td className="px-4 py-3 bg-gray-50 font-medium text-sm">대표자 명</td>
-                    <td className="px-4 py-3 text-sm">{company.organizationInfo.ceoName}</td>
+                  <tr>
+                    <td className={SUP_DETAIL_TD_LABEL}>대표자명</td>
+                    <td className={SUP_DETAIL_TD}>{safe(company.organizationInfo.ceoName)}</td>
                   </tr>
-                  <tr className="border-b border-gray-200">
-                    <td className="px-4 py-3 bg-gray-50 font-medium text-sm">대표 이메일</td>
-                    <td className="px-4 py-3 text-sm">{company.organizationInfo.ceoEmail}</td>
+                  <tr>
+                    <td className={SUP_DETAIL_TD_LABEL}>대표 이메일</td>
+                    <td className={SUP_DETAIL_TD}>{safe(company.organizationInfo.ceoEmail)}</td>
                   </tr>
-                  <tr className="border-b border-gray-200">
-                    <td className="px-4 py-3 bg-gray-50 font-medium text-sm">대표자 연락처</td>
-                    <td className="px-4 py-3 text-sm">{company.organizationInfo.ceoPhone}</td>
+                  <tr>
+                    <td className={SUP_DETAIL_TD_LABEL}>대표자 연락처</td>
+                    <td className={SUP_DETAIL_TD}>{safe(company.organizationInfo.ceoPhone)}</td>
                   </tr>
-                  <tr className="border-b border-gray-200">
-                    <td className="px-4 py-3 bg-gray-50 font-medium text-sm">RMI Smelter 여부</td>
-                    <td className="px-4 py-3 text-sm">
-                      <span className={`px-2 py-1 rounded text-xs font-medium ${company.organizationInfo.rmiSmelter ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'}`}>
-                        {company.organizationInfo.rmiSmelter ? 'Yes' : 'No'}
-                      </span>
-                    </td>
+                  <tr>
+                    <td className={SUP_DETAIL_TD_LABEL}>RMI 인증 여부</td>
+                    <td className={SUP_DETAIL_TD}>{toRmi(company.organizationInfo.rmiSmelter)}</td>
                   </tr>
-                  <tr className="border-b border-gray-200">
-                    <td className="px-4 py-3 bg-gray-50 font-medium text-sm">FEOC 여부</td>
-                    <td className="px-4 py-3 text-sm">
-                      <span className={`px-2 py-1 rounded text-xs font-medium ${company.organizationInfo.feoc ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'}`}>
-                        {company.organizationInfo.feoc ? 'Yes' : 'No'}
-                      </span>
-                    </td>
+                  <tr>
+                    <td className={SUP_DETAIL_TD_LABEL}>FEOC 여부</td>
+                    <td className={SUP_DETAIL_TD}>{toYesNo(company.organizationInfo.feoc)}</td>
                   </tr>
-                  <tr className="border-b border-gray-200">
-                    <td className="px-4 py-3 bg-gray-50 font-medium text-sm">공급자 유형</td>
-                    <td className="px-4 py-3 text-sm">{company.organizationInfo.supplierType}</td>
+                  <tr>
+                    <td className={SUP_DETAIL_TD_LABEL}>공급자 유형</td>
+                    <td className={SUP_DETAIL_TD}>{safe(company.organizationInfo.supplierType)}</td>
                   </tr>
                 </tbody>
               </table>
-            </div>
+            </Shell>
           );
           
-        case 1: // 사업장 정보
+        case 1: // 담당자 정보
           return (
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead className="bg-gray-50 border-b-2 border-gray-200">
+            <Shell>
+              <table className={SUP_DETAIL_TABLE}>
+                <thead>
                   <tr>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">종사업장번호</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">사업장 명</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">국가 소재지</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">상세주소</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">대표자 명</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">신재생 에너지</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">환경 인증</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">RMI Smelter</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">FEOC 여부</th>
+                    <th className={SUP_DETAIL_TH}>부서명</th>
+                    <th className={SUP_DETAIL_TH}>직급</th>
+                    <th className={SUP_DETAIL_TH}>이름</th>
+                    <th className={SUP_DETAIL_TH}>이메일</th>
+                    <th className={SUP_DETAIL_TH}>연락처</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {company.siteInfo.map((site, idx) => (
-                    <tr key={site.siteId} className={`border-b border-gray-100 ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}`}>
-                      <td className="px-4 py-3 text-sm">{site.siteId}</td>
-                      <td className="px-4 py-3 text-sm font-medium">{site.siteName}</td>
-                      <td className="px-4 py-3 text-sm">{site.country}</td>
-                      <td className="px-4 py-3 text-sm">{site.address}</td>
-                      <td className="px-4 py-3 text-sm">{site.managerName}</td>
-                      <td className="px-4 py-3 text-sm">
-                        <span className={`px-2 py-1 rounded text-xs font-medium ${site.renewableEnergy ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'}`}>
-                          {site.renewableEnergy ? 'Yes' : 'No'}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-sm">{site.environmentalCertification}</td>
-                      <td className="px-4 py-3 text-sm">
-                        <span className={`px-2 py-1 rounded text-xs font-medium ${site.rmiSmelter ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'}`}>
-                          {site.rmiSmelter ? 'Yes' : 'No'}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-sm">
-                        <span className={`px-2 py-1 rounded text-xs font-medium ${site.feoc ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'}`}>
-                          {site.feoc ? 'Yes' : 'No'}
-                        </span>
-                      </td>
+                  {(company.contactInfo ?? []).map((c, idx) => (
+                    <tr key={idx} className="hover:bg-gray-50 transition-colors">
+                      <td className={SUP_DETAIL_TD}>{safe(c.department)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(c.position)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(c.name)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(c.email)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(c.phone)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-            </div>
+            </Shell>
           );
           
-        case 2: // 납품 제품 정보
+        case 2: // 사업장 정보
           return (
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead className="bg-gray-50 border-b-2 border-gray-200">
+            <Shell>
+              <table className={SUP_DETAIL_TABLE_EDITABLE}>
+                <thead>
                   <tr>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">제품 ID</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">제품명</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">납품 수량</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">단위</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">제품표준중량</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">제품 단위 중량</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">HS 코드</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">광물 종류</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">광물 함량</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">재활용 비율</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">광물 원산지</th>
+                    <th className={SUP_DETAIL_TH}>사업자등록번호</th>
+                    <th className={SUP_DETAIL_TH}>종사업장번호</th>
+                    <th className={SUP_DETAIL_TH}>사업장 명</th>
+                    <th className={SUP_DETAIL_TH}>국가 소재지</th>
+                    <th className={SUP_DETAIL_TH}>상세주소</th>
+                    <th className={SUP_DETAIL_TH}>대표자명</th>
+                    <th className={SUP_DETAIL_TH}>대표 이메일</th>
+                    <th className={SUP_DETAIL_TH}>대표자 연락처</th>
+                    <th className={SUP_DETAIL_TH}>RMI 인증 여부</th>
+                    <th className={SUP_DETAIL_TH}>FEOC 여부</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {company.productInfo && company.productInfo.map((product, idx) => (
-                    <tr key={product.productId} className={`border-b border-gray-100 ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}`}>
-                      <td className="px-4 py-3 text-sm">{product.productId}</td>
-                      <td className="px-4 py-3 text-sm font-medium">{product.productName}</td>
-                      <td className="px-4 py-3 text-sm">{product.deliveryQuantity.toLocaleString()}</td>
-                      <td className="px-4 py-3 text-sm">{product.unit}</td>
-                      <td className="px-4 py-3 text-sm">{product.standardWeight} kg</td>
-                      <td className="px-4 py-3 text-sm">{product.unitWeight} kg</td>
-                      <td className="px-4 py-3 text-sm">{product.hsCode}</td>
-                      <td className="px-4 py-3 text-sm">{product.mineralType}</td>
-                      <td className="px-4 py-3 text-sm">{product.mineralContent}%</td>
-                      <td className="px-4 py-3 text-sm">{product.recyclingRatio}%</td>
-                      <td className="px-4 py-3 text-sm">{product.mineralOrigin}</td>
+                  {facilitiesRows.map((r, idx) => (
+                    <tr key={idx} className="hover:bg-gray-50 transition-colors">
+                      <td className={SUP_DETAIL_TD}>{safe(r.registrationNumber)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.siteSubNumber)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.name)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.country)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.address)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.representative)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.email)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.phone)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.rmiSmelter)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.feoc)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-            </div>
+            </Shell>
           );
           
-        case 3: // 생산 및 투입 실적
+        case 3: // 생산(납품) 제품 정보
           return (
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead className="bg-gray-50 border-b-2 border-gray-200">
+            <Shell>
+              <table className={SUP_DETAIL_TABLE_EDITABLE}>
+                <thead>
                   <tr>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">대상 제품</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">투입 자재 카테고리</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">투입 자재명</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">투입량</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">재활용 비율</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">에너지 사용량</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">운송 수단</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">산출물</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">손실량</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">폐기물</th>
+                    <th className={SUP_DETAIL_TH}>제품명</th>
+                    <th className={SUP_DETAIL_TH}>광물 원산지</th>
+                    <th className={SUP_DETAIL_TH}>납품일</th>
+                    <th className={SUP_DETAIL_TH}>납품 수량(생산량)</th>
+                    <th className={SUP_DETAIL_TH}>납품 단위(unit)</th>
+                    <th className={SUP_DETAIL_TH}>단위 실측 중량 (kg per unit)</th>
+                    <th className={SUP_DETAIL_TH}>폐기물량</th>
+                    <th className={SUP_DETAIL_TH}>폐기물 배출계수</th>
+                    <th className={SUP_DETAIL_TH}>폐기물 배출계수 단위</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {company.productionInfo && company.productionInfo.map((production, idx) => (
-                    <tr key={idx} className={`border-b border-gray-100 ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}`}>
-                      <td className="px-4 py-3 text-sm font-medium">{production.targetProduct}</td>
-                      <td className="px-4 py-3 text-sm">{production.materialCategory}</td>
-                      <td className="px-4 py-3 text-sm">{production.materialName}</td>
-                      <td className="px-4 py-3 text-sm">{production.materialQuantity.toLocaleString()} {production.unit}</td>
-                      <td className="px-4 py-3 text-sm">{production.recyclingRatio}%</td>
-                      <td className="px-4 py-3 text-sm">{production.energyUsage.toLocaleString()} {production.energyUnit}</td>
-                      <td className="px-4 py-3 text-sm">{production.transportMode}</td>
-                      <td className="px-4 py-3 text-sm">{production.output.toLocaleString()}</td>
-                      <td className="px-4 py-3 text-sm">{production.loss.toLocaleString()}</td>
-                      <td className="px-4 py-3 text-sm">{production.waste.toLocaleString()}</td>
+                  {(productRows.length > 0 ? productRows : [{ name: '-', origin: '-', deliveryDate: '-', quantity: '-', unit: '-', standardWeight: '-', wasteQuantity: '-', wasteEmissionFactor: '-', wasteEmissionFactorUnit: '-' }]).map((r, idx) => (
+                    <tr key={idx} className="hover:bg-gray-50 transition-colors">
+                      <td className={SUP_DETAIL_TD}>{safe(r.name)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.origin)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.deliveryDate)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.quantity)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.unit)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.standardWeight)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.wasteQuantity)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.wasteEmissionFactor)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.wasteEmissionFactorUnit)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-            </div>
+            </Shell>
           );
-          
-        case 4: // 담당자 정보
+
+        case 4: // 자재 정보
           return (
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead className="bg-gray-50 border-b-2 border-gray-200">
+            <Shell>
+              <table className={SUP_DETAIL_TABLE_EDITABLE}>
+                <thead>
                   <tr>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">부서명</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">직급</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">이름</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">이메일</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700">연락처</th>
+                    <th className={SUP_DETAIL_TH}>제품명</th>
+                    <th className={SUP_DETAIL_TH}>투입 자재명</th>
+                    <th className={SUP_DETAIL_TH}>투입량</th>
+                    <th className={SUP_DETAIL_TH}>투입량 단위</th>
+                    <th className={SUP_DETAIL_TH}>자재 배출계수</th>
+                    <th className={SUP_DETAIL_TH}>자재 배출계수 단위</th>
+                    <th className={SUP_DETAIL_TH}>투입 광물 종류</th>
+                    <th className={SUP_DETAIL_TH}>투입 광물량</th>
+                    <th className={SUP_DETAIL_TH}>광물 원산지</th>
+                    <th className={SUP_DETAIL_TH}>광물 배출계수</th>
+                    <th className={SUP_DETAIL_TH}>광물 배출계수 단위</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {company.contactInfo.map((contact, idx) => (
-                    <tr key={idx} className={`border-b border-gray-100 ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}`}>
-                      <td className="px-4 py-3 text-sm">{contact.department}</td>
-                      <td className="px-4 py-3 text-sm">{contact.position}</td>
-                      <td className="px-4 py-3 text-sm font-medium">{contact.name}</td>
-                      <td className="px-4 py-3 text-sm">{contact.email}</td>
-                      <td className="px-4 py-3 text-sm">{contact.phone}</td>
+                  {materialRows.map((r, idx) => (
+                    <tr key={idx} className="hover:bg-gray-50 transition-colors">
+                      <td className={SUP_DETAIL_TD}>{safe(r.productName)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.inputMaterialName)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.inputAmount)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.inputAmountUnit)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.materialEmissionFactor)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.materialEmissionFactorUnit)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.mineralType)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.mineralAmount)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.mineralOrigin)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.mineralEmissionFactor)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.mineralEmissionFactorUnit)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-            </div>
+            </Shell>
+          );
+
+        case 5: // 에너지 정보
+          return (
+            <Shell>
+              <table className={SUP_DETAIL_TABLE_EDITABLE}>
+                <thead>
+                  <tr>
+                    <th className={SUP_DETAIL_TH}>제품명</th>
+                    <th className={SUP_DETAIL_TH}>에너지 유형</th>
+                    <th className={SUP_DETAIL_TH}>에너지 사용량</th>
+                    <th className={SUP_DETAIL_TH}>에너지 단위</th>
+                    <th className={SUP_DETAIL_TH}>에너지 배출계수</th>
+                    <th className={SUP_DETAIL_TH}>에너지 배출계수 단위</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {energyRows.map((r, idx) => (
+                    <tr key={idx} className="hover:bg-gray-50 transition-colors">
+                      <td className={SUP_DETAIL_TD}>{safe(r.productName)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.energyType)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.energyUsage)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.energyUnit)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.emissionFactor)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.emissionFactorUnit)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </Shell>
+          );
+
+        case 6: // 운송 정보
+          return (
+            <Shell>
+              <table className={SUP_DETAIL_TABLE_EDITABLE}>
+                <thead>
+                  <tr>
+                    <th className={SUP_DETAIL_TH}>제품명</th>
+                    <th className={SUP_DETAIL_TH}>출발지 국가</th>
+                    <th className={SUP_DETAIL_TH}>출발지 상세 주소</th>
+                    <th className={SUP_DETAIL_TH}>도착지 국가</th>
+                    <th className={SUP_DETAIL_TH}>도착지 상세주소</th>
+                    <th className={SUP_DETAIL_TH}>운송수단</th>
+                    <th className={SUP_DETAIL_TH}>운송 물량</th>
+                    <th className={SUP_DETAIL_TH}>물량 단위</th>
+                    <th className={SUP_DETAIL_TH}>운송 배출계수</th>
+                    <th className={SUP_DETAIL_TH}>운송 배출계수 단위</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {transportRows.map((r, idx) => (
+                    <tr key={idx} className="hover:bg-gray-50 transition-colors">
+                      <td className={SUP_DETAIL_TD}>{safe(r.productName)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.originCountry)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.originAddress)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.destinationCountry)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.destinationAddress)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.transportMethod)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.transportAmount)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.transportAmountUnit)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.emissionFactor)}</td>
+                      <td className={SUP_DETAIL_TD}>{safe(r.emissionFactorUnit)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </Shell>
           );
           
         default:
@@ -883,35 +1048,26 @@ export default function CompanyDetail() {
         </div>
       </div>
       
-      {/* Tabs Section - Excel Sheet Style */}
-      <div
-        className="bg-white overflow-hidden"
-        style={{
-          borderRadius: '20px',
-          boxShadow: '0px 4px 16px rgba(0,0,0,0.05)',
-        }}
-      >
-        {/* Tab Headers - Excel Style */}
-        <div className="flex border-b border-gray-200 bg-gray-50">
+      {/* Tabs */}
+      <div className="bg-white rounded-[20px] p-6" style={{ boxShadow: '0px 4px 16px rgba(0,0,0,0.05)' }}>
+        <div className="flex flex-wrap gap-2 border-b border-gray-200 pb-3 mb-6">
           {tabs.map((tab, index) => (
             <button
               key={index}
               onClick={() => setActiveTab(index)}
-              className={`px-6 py-3 text-sm font-medium transition-colors border-r border-gray-200 ${
+              className="px-4 py-2 rounded-lg text-sm transition-all duration-200"
+              style={
                 activeTab === index
-                  ? 'bg-white text-[#5B3BFA] border-b-2 border-[#5B3BFA] -mb-px'
-                  : 'text-gray-600 hover:bg-gray-100'
-              }`}
+                  ? { background: 'var(--aifix-primary)', color: 'white', fontWeight: 700 }
+                  : { background: '#F1F5F9', color: 'var(--aifix-navy)', fontWeight: 600 }
+              }
             >
               {tab}
             </button>
           ))}
         </div>
-        
-        {/* Tab Content */}
-        <div className="p-6">
-          {renderTabContent()}
-        </div>
+
+        {renderTabContent()}
       </div>
     </div>
   );

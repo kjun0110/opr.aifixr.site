@@ -56,8 +56,8 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           <div className="flex items-center justify-between h-20">
             {/* 로고 */}
             <Link href="/dashboard" className="flex items-center gap-2 hover:opacity-90 transition-opacity">
-              <Building2 size={32} className="text-purple-600" strokeWidth={2} />
-              <h1 className="text-2xl font-bold bg-gradient-to-r from-purple-600 to-cyan-500 bg-clip-text text-transparent">
+              <Building2 size={32} strokeWidth={2} style={{ color: 'var(--aifix-primary)' }} />
+              <h1 className="text-2xl font-bold bg-gradient-to-r from-[#5B3BFA] to-[#00B4FF] bg-clip-text text-transparent">
                 AIFIX
               </h1>
             </Link>

@@ -388,7 +388,7 @@ export default function NotificationsPage() {
             setMailbox('inbox');
           }}
           className={cn(
-            'px-4 py-3 text-base font-medium border-b-2 -mb-px transition-colors',
+            'px-4 py-3 text-xl font-bold border-b-2 -mb-px transition-colors',
             mailbox === 'inbox'
               ? 'border-purple-600 text-purple-600'
               : 'border-transparent text-gray-500 hover:text-gray-700'
@@ -404,7 +404,7 @@ export default function NotificationsPage() {
             setShowActionRequiredOnly(false);
           }}
           className={cn(
-            'px-4 py-3 text-base font-medium border-b-2 -mb-px transition-colors',
+            'px-4 py-3 text-xl font-bold border-b-2 -mb-px transition-colors',
             mailbox === 'outbox'
               ? 'border-purple-600 text-purple-600'
               : 'border-transparent text-gray-500 hover:text-gray-700'

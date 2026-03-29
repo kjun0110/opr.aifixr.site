@@ -1,13 +1,13 @@
 import {
   AIFIXR_SESSION_UPDATED_EVENT,
   actorStorageKey,
-  apiFetch,
   apiUrl,
   OPR_DEPARTMENT_STORAGE_KEY,
   postOprLogout,
 } from "./client";
 import { setOprAccessToken } from "./sessionAccessToken";
-import { PATH_AUTH_OPR_GOOGLE_LINK_START, PATH_AUTH_OPR_LOGIN } from "./paths";
+import { PATH_AUTH_OPR_LOGIN } from "./paths";
+import { fetchOprGoogleLinkAuthUrl } from "./oprGoogleLink";
 
 export type OprLoginUser = {
   id: string;
@@ -64,18 +64,9 @@ export async function loginOprAndStoreSession(
   return data;
 }
 
-/** DB 로그인 후 JWT로 Google 연동(동의) 화면으로 보낼 URL 조회 */
+/** 로그인된 원청 JWT로 Google(Gmail) 연동 화면 URL 조회 */
 export async function getOprGoogleLinkAuthUrl(): Promise<string> {
-  const data = await apiFetch<{ authUrl?: string; error?: string }>(
-    PATH_AUTH_OPR_GOOGLE_LINK_START,
-  );
-  if (data.error) {
-    throw new Error(data.error);
-  }
-  if (!data.authUrl) {
-    throw new Error("Google 연동 URL을 받지 못했습니다.");
-  }
-  return data.authUrl;
+  return fetchOprGoogleLinkAuthUrl();
 }
 
 export async function clearOprSession(): Promise<void> {
