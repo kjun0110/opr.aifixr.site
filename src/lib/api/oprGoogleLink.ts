@@ -4,8 +4,21 @@ import { PATH_AUTH_OPR_GOOGLE_LINK_START } from "./paths";
 /** OAuth 완료 후 돌아올 경로 (sessionStorage) */
 export const OPR_GOOGLE_LINK_RETURN_STORAGE_KEY = "aifix_opr_google_link_return";
 
-/** 초대 발송(428)으로 연동 플로우를 탄 경우 복귀 시 이 경로로 이동 */
-const OPR_INVITE_RETURN_PATH = "/dashboard/invite";
+/** 초대 모달이 있는 페이지로 복귀 + 모달 자동 오픈용 쿼리 */
+const TIER1_INVITE_REOPEN_QUERY = "tier1Invite=1";
+
+/**
+ * Gmail 연동(초대 발송 428) 직전 현재 화면으로 돌아가며, 1차 초대 모달을 다시 연다.
+ * (예: /dashboard/project-supply-chain → 동일 경로?tier1Invite=1)
+ */
+export function buildPathForOprInviteGoogleLinkReturn(): string {
+  if (typeof window === "undefined") {
+    return `/dashboard/project-supply-chain?${TIER1_INVITE_REOPEN_QUERY}`;
+  }
+  const u = new URL(window.location.href);
+  u.searchParams.set("tier1Invite", "1");
+  return `${u.pathname}${u.search}`;
+}
 
 export async function fetchOprGoogleLinkAuthUrl(): Promise<string> {
   const data = await apiFetch<{ authUrl?: string; error?: string }>(
@@ -28,13 +41,13 @@ export async function fetchOprGoogleLinkAuthUrl(): Promise<string> {
 export function rememberReturnPathForOprGoogleLink(fromInvite?: boolean): void {
   if (typeof window === "undefined") return;
   const path = fromInvite
-    ? OPR_INVITE_RETURN_PATH
+    ? buildPathForOprInviteGoogleLinkReturn()
     : `${window.location.pathname}${window.location.search}`;
   sessionStorage.setItem(OPR_GOOGLE_LINK_RETURN_STORAGE_KEY, path);
 }
 
 export type StartOprGoogleLinkFlowOptions = {
-  /** true면 연동 후 초대 탭(/dashboard/invite)으로 복귀 */
+  /** true면 연동 후 초대 모달이 있던 페이지로 복귀(모달 자동 오픈) */
   fromInvite?: boolean;
 };
 

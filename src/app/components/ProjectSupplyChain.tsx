@@ -1,9 +1,10 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
-import { ChevronDown, ChevronRight, Plus, Search, Check, Minus, X } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { ChevronDown, ChevronRight, Plus, Search, Check, Minus, X, UserPlus } from 'lucide-react';
 import { toast } from 'sonner';
 import SupplyChainDiagram from './SupplyChainDiagram';
+import Invite from './Invite';
 import { useMode } from '../context/ModeContext';
 import { apiFetch } from '@/lib/api/client';
 import { SUPPLY_CHAIN_BASE } from '@/lib/api/supply-chain';
@@ -307,6 +308,8 @@ type RegisteredTier1Supplier = {
 export default function ProjectSupplyChain() {
   const { mode } = useMode();
   const isProcurementView = mode === 'procurement'; // 1차 협력사 추가는 구매 관점에서만 가능
+  /** 초대 모달: 구매는 발송·이력·승인, PCF는 Invite 내부에서 이력 조회만 */
+  const canOpenTier1InviteModal = mode === 'procurement' || mode === 'pcf';
   const [apiProjects, setApiProjects] = useState<Project[]>([]);
   /** /customers 응답만으로 채움 — 전체 트리 로딩 전에도 고객사 토글에 목록 표시 */
   const [apiCustomers, setApiCustomers] = useState<ApiCustomer[]>([]);
@@ -327,6 +330,7 @@ export default function ProjectSupplyChain() {
   const [hasQueried, setHasQueried] = useState(false);
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set(['tier0-1']));
   const [showAddSupplierModal, setShowAddSupplierModal] = useState(false);
+  const [showTier1InviteManageModal, setShowTier1InviteManageModal] = useState(false);
   // 제품 단위 (product_code 기준)
   const [selectedProductCode, setSelectedProductCode] = useState<string>('');
   // 세부제품(BOM) 단위
@@ -452,6 +456,23 @@ export default function ProjectSupplyChain() {
       return true;
     });
   }, [projectRows, selectedCustomer, selectedBranchKey]);
+
+  /** Google Gmail 연동 완료 후 복귀 시 1차 초대 모달 자동 오픈 (?tier1Invite=1) */
+  const tier1InviteReopenHandled = useRef(false);
+  useEffect(() => {
+    if (typeof window === 'undefined' || tier1InviteReopenHandled.current) return;
+    const sp = new URLSearchParams(window.location.search);
+    if (sp.get('tier1Invite') !== '1') return;
+    tier1InviteReopenHandled.current = true;
+    if (mode === 'procurement' || mode === 'pcf') {
+      setShowTier1InviteManageModal(true);
+    }
+    sp.delete('tier1Invite');
+    const q = sp.toString();
+    const path = window.location.pathname;
+    const nextUrl = q ? `${path}?${q}` : path;
+    window.history.replaceState(null, '', nextUrl);
+  }, [mode]);
 
   useEffect(() => {
     let mounted = true;
@@ -1133,19 +1154,41 @@ export default function ProjectSupplyChain() {
             <h1 className="text-3xl font-bold text-gray-900 mb-2">프로젝트 / 공급망 관리</h1>
             <p className="text-gray-600">프로젝트 단위로 공급망 구조와 BOM 기반 협력사 구성을 관리합니다.</p>
           </div>
-          <button
-            onClick={() => isProcurementView && openAddSupplierModal()}
-            disabled={!isProcurementView}
-            title={!isProcurementView ? '1차 협력사 추가는 구매 직무에서만 사용할 수 있습니다' : undefined}
-            className="flex items-center gap-2 px-4 py-2 bg-white border-2 rounded-xl font-medium transition-all hover:bg-purple-50 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-white whitespace-nowrap"
-            style={{
-              borderColor: isProcurementView ? '#5B3BFA' : '#d1d5db',
-              color: isProcurementView ? '#5B3BFA' : '#9ca3af',
-            }}
-          >
-            <Plus size={18} />
-            1차 협력사 추가
-          </button>
+          <div className="flex flex-wrap items-center justify-end gap-3">
+            <button
+              onClick={() => isProcurementView && openAddSupplierModal()}
+              disabled={!isProcurementView}
+              title={!isProcurementView ? '1차 협력사 추가는 구매 직무에서만 사용할 수 있습니다' : undefined}
+              className="flex items-center gap-2 px-4 py-2 bg-white border-2 rounded-xl font-medium transition-all hover:bg-purple-50 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-white whitespace-nowrap"
+              style={{
+                borderColor: isProcurementView ? '#5B3BFA' : '#d1d5db',
+                color: isProcurementView ? '#5B3BFA' : '#9ca3af',
+              }}
+            >
+              <Plus size={18} />
+              1차 협력사 추가
+            </button>
+            <button
+              type="button"
+              onClick={() => canOpenTier1InviteModal && setShowTier1InviteManageModal(true)}
+              disabled={!canOpenTier1InviteModal}
+              title={
+                mode === 'pcf'
+                  ? 'ESG(PCF) 직무에서는 발송 이력 조회만 가능합니다. 메일 발송·승인은 구매 직무에서 진행합니다.'
+                  : undefined
+              }
+              className="flex items-center gap-2 px-4 py-2 rounded-xl font-semibold text-white transition-all hover:scale-[1.02] disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 whitespace-nowrap"
+              style={{
+                background: canOpenTier1InviteModal
+                  ? 'linear-gradient(90deg, #5B3BFA 0%, #00B4FF 100%)'
+                  : '#d1d5db',
+                boxShadow: canOpenTier1InviteModal ? '0px 4px 12px rgba(91, 59, 250, 0.2)' : undefined,
+              }}
+            >
+              <UserPlus size={18} />
+              1차협력사 초대 및 관리
+            </button>
+          </div>
         </div>
 
         {/* Filter Section - Only Project-level filters */}
@@ -1364,6 +1407,52 @@ export default function ProjectSupplyChain() {
       </div>
 
       {/* Add Supplier Modal */}
+      {showTier1InviteManageModal && (
+        <div
+          className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4"
+          onClick={() => setShowTier1InviteManageModal(false)}
+          role="presentation"
+        >
+          <div
+            className="bg-white rounded-[20px] w-full max-w-6xl max-h-[92vh] overflow-hidden flex flex-col"
+            style={{ boxShadow: '0px 8px 32px rgba(0, 0, 0, 0.2)' }}
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="tier1-invite-manage-title"
+            aria-describedby="tier1-invite-manage-desc"
+          >
+            <div
+              className="flex items-center justify-between gap-4 p-6 border-b shrink-0"
+              style={{ borderColor: '#E0E0E0' }}
+            >
+              <div>
+                <h2
+                  id="tier1-invite-manage-title"
+                  className="text-2xl font-bold text-gray-900 mb-1"
+                >
+                  1차협력사 초대 및 관리
+                </h2>
+                <p id="tier1-invite-manage-desc" className="text-sm text-gray-600">
+                  등록된 1차 협력사에게 AIFIX 회원가입 안내 메일을 발송합니다
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowTier1InviteManageModal(false)}
+                className="w-8 h-8 rounded-lg flex items-center justify-center hover:bg-gray-100 text-gray-500 transition-colors shrink-0"
+                aria-label="닫기"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="flex-1 min-h-0 flex flex-col overflow-hidden px-4 pb-4 pt-3 md:px-6 md:pb-6 bg-[#F6F8FB]">
+              <Invite embedded />
+            </div>
+          </div>
+        </div>
+      )}
+
       {showAddSupplierModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
           <div className="bg-white rounded-2xl p-8 max-w-2xl w-full mx-4" style={{ boxShadow: '0px 8px 32px rgba(0, 0, 0, 0.12)' }}>

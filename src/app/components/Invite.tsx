@@ -1,7 +1,22 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
-import { Upload, Plus, FileText, Eye, Send, CheckCircle, Clock, AlertCircle, Check, XCircle, ShieldAlert } from 'lucide-react';
+import {
+  Upload,
+  Plus,
+  FileText,
+  Eye,
+  Send,
+  CheckCircle,
+  Clock,
+  AlertCircle,
+  Check,
+  XCircle,
+  ShieldAlert,
+  Building2,
+  User,
+  Mail,
+} from 'lucide-react';
 import { toast } from 'sonner';
 import { useMode } from '../context/ModeContext';
 import { getInvitationHistory, postOprInvitation, type InvitationHistoryItem } from '@/lib/api/invitation';
@@ -20,6 +35,12 @@ type Tier1Supplier = {
   productVariantId?: number;
 };
 
+/** 협력사 초대 모달과 동일하게 — 이름 뒤 괄호 보조표기 (코드 없으면 공급망 등록) */
+function formatOprTier1OptionLabel(s: Tier1Supplier): string {
+  const tag = s.nameEn?.trim() ? s.nameEn.trim() : '공급망 등록';
+  return `${s.name} (${tag})`;
+}
+
 type RecipientCardProps = {
   index: number;
   recipient: Recipient;
@@ -27,6 +48,7 @@ type RecipientCardProps = {
   onRemove?: () => void;
   eligibleTier1Suppliers: Array<Tier1Supplier>;
   supplierEmailById: Record<string, string>;
+  suppliersLoading: boolean;
 };
 
 function RecipientCard({
@@ -36,33 +58,14 @@ function RecipientCard({
   onRemove,
   eligibleTier1Suppliers,
   supplierEmailById,
+  suppliersLoading,
 }: RecipientCardProps) {
-  const [open, setOpen] = useState(false);
-  const wrapRef = useRef<HTMLDivElement | null>(null);
-
-  const filtered = useMemo(() => {
-    const q = recipient.company.trim().toLowerCase();
-    if (!q) return eligibleTier1Suppliers;
-    return eligibleTier1Suppliers.filter(
-      s =>
-        s.name.trim().toLowerCase().includes(q) || (s.nameEn ?? '').toLowerCase().includes(q),
-    );
-  }, [recipient.company, eligibleTier1Suppliers]);
-
-  useEffect(() => {
-    const onMouseDown = (e: MouseEvent) => {
-      const el = wrapRef.current;
-      if (!el) return;
-      if (!el.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener('mousedown', onMouseDown);
-    return () => document.removeEventListener('mousedown', onMouseDown);
-  }, []);
+  const selectDisabled = suppliersLoading || eligibleTier1Suppliers.length === 0;
 
   return (
-    <div className="p-4 border border-gray-200 rounded-2xl bg-white">
-      <div className="flex items-start justify-between gap-3 mb-4">
-        <div className="text-sm font-semibold text-gray-900">발신인 {index + 1}</div>
+    <div className="p-4 rounded-xl border border-gray-200 bg-white">
+      <div className="flex items-start justify-between gap-3 mb-3">
+        <div className="text-sm font-bold text-gray-900">발신인 {index + 1}</div>
         {index > 0 && onRemove && (
           <button
             type="button"
@@ -76,71 +79,77 @@ function RecipientCard({
         )}
       </div>
 
-      <div className="space-y-3">
+      <div className="space-y-4">
         <div>
-          <label className="block text-sm font-semibold text-gray-700 mb-2">회사명</label>
-          <div ref={wrapRef} className="relative">
-            <input
-              type="text"
-              value={recipient.company}
-              onChange={(e) => onChange({ ...recipient, company: e.target.value, scopeId: undefined })}
-              onFocus={() => setOpen(true)}
-              placeholder="회사명 (등록된 1차 협력사)"
-              className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500 text-sm"
+          <label className="block text-sm font-semibold text-gray-900 mb-2">협력사 회사명 *</label>
+          <div className="relative">
+            <Building2
+              className="pointer-events-none absolute left-3 top-1/2 z-[1] h-4 w-4 -translate-y-1/2 text-gray-400"
+              aria-hidden
             />
-
-            {open && (
-              <div className="absolute left-0 right-0 z-20 mt-2 bg-white border border-gray-200 rounded-xl shadow-lg overflow-hidden">
-                {filtered.length === 0 ? (
-                  <div className="px-4 py-2 text-sm text-gray-500">검색 결과가 없습니다</div>
-                ) : (
-                  filtered.map(s => (
-                    <button
-                      key={s.id}
-                      type="button"
-                      onClick={() => {
-                        onChange({
-                          ...recipient,
-                          company: s.name,
-                          scopeId: s.id,
-                          email: recipient.email.trim()
-                            ? recipient.email
-                            : (supplierEmailById[s.id] ?? ''),
-                        });
-                        setOpen(false);
-                      }}
-                      className="w-full text-left px-4 py-2.5 hover:bg-purple-50 transition-all"
-                    >
-                      <div className="text-sm font-medium text-gray-900">{s.name}</div>
-                      {s.nameEn ? <div className="text-xs text-gray-500">{s.nameEn}</div> : null}
-                    </button>
-                  ))
-                )}
-              </div>
-            )}
+            <select
+              value={recipient.scopeId ?? ''}
+              onChange={(e) => {
+                const v = e.target.value;
+                const s = eligibleTier1Suppliers.find((x) => x.id === v);
+                onChange({
+                  ...recipient,
+                  scopeId: v || undefined,
+                  company: s?.name ?? '',
+                  email: recipient.email.trim()
+                    ? recipient.email
+                    : (v ? (supplierEmailById[v] ?? '') : ''),
+                });
+              }}
+              disabled={selectDisabled}
+              className="w-full appearance-none rounded-lg border border-gray-300 bg-white py-2.5 pl-10 pr-3 text-sm transition-all focus:border-purple-600 focus:outline-none focus:ring-1 focus:ring-purple-500 disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-500"
+            >
+              <option value="">
+                {suppliersLoading
+                  ? '목록 불러오는 중…'
+                  : eligibleTier1Suppliers.length === 0
+                    ? '등록된 1차 협력사가 없습니다'
+                    : '등록된 1차 협력사 선택'}
+              </option>
+              {eligibleTier1Suppliers.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {formatOprTier1OptionLabel(s)}
+                </option>
+              ))}
+            </select>
           </div>
         </div>
 
-        <div className="grid grid-cols-1 gap-3">
-          <div>
-            <label className="block text-sm font-semibold text-gray-700 mb-2">담당자 이름</label>
+        <div>
+          <label className="block text-sm font-semibold text-gray-900 mb-2">담당자 이름 *</label>
+          <div className="relative">
+            <User
+              className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400"
+              aria-hidden
+            />
             <input
               type="text"
               value={recipient.contactName}
               onChange={(e) => onChange({ ...recipient, contactName: e.target.value })}
-              placeholder="담당자 이름"
-              className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500 text-sm"
+              placeholder="예: 김철수"
+              className="w-full rounded-lg border border-gray-300 py-2.5 pl-10 pr-3 text-sm transition-all focus:border-purple-600 focus:outline-none focus:ring-1 focus:ring-purple-500"
             />
           </div>
+        </div>
 
-          <div>
-            <label className="block text-sm font-semibold text-gray-700 mb-2">담당자 이메일</label>
+        <div>
+          <label className="block text-sm font-semibold text-gray-900 mb-2">담당자 이메일 *</label>
+          <div className="relative">
+            <Mail
+              className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400"
+              aria-hidden
+            />
             <input
               type="email"
               value={recipient.email}
               onChange={(e) => onChange({ ...recipient, email: e.target.value })}
-              placeholder="이메일"
-              className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500 text-sm"
+              placeholder="예: contact@company.com"
+              className="w-full rounded-lg border border-gray-300 py-2.5 pl-10 pr-3 text-sm transition-all focus:border-purple-600 focus:outline-none focus:ring-1 focus:ring-purple-500"
             />
           </div>
         </div>
@@ -149,11 +158,16 @@ function RecipientCard({
   );
 }
 
-export default function Invite() {
+export type InviteProps = {
+  /** true: 프로젝트/공급망 모달 안에서만 사용 — 페이지 헤더 숨김·내부 스크롤 */
+  embedded?: boolean;
+};
+
+export default function Invite({ embedded = false }: InviteProps) {
   const { mode } = useMode();
 
   const [recipients, setRecipients] = useState<Array<Recipient>>([
-    { company: '', email: '', contactName: '' },
+    { company: '', email: '', contactName: '', scopeId: undefined },
   ]);
   const [eligibleTier1Suppliers, setEligibleTier1Suppliers] = useState<Array<Tier1Supplier>>([]);
   const [loadingSuppliers, setLoadingSuppliers] = useState(false);
@@ -261,8 +275,12 @@ https://aifix.com/signup
         const allNodesPromises = allVariants.map(async (item) => {
           try {
             const nodes = await apiFetch<any[]>(`/api/supply-chain/project-supply-chain/projects/${item.project.id}/product-variants/${item.variant.id}/nodes`);
-            const tier1Nodes = nodes.filter((n: any) => 
-              (n.tier === 1 || (n.tier === null && n.status === 'added'))
+            // 원청 직속 1차만: API의 parent_node_id = DB supply_chain_node_id(상위 노드).
+            // 협력사가 등록한 직하위(2차+)는 parent가 1차 노드를 가리키므로 제외.
+            const tier1Nodes = nodes.filter(
+              (n: any) =>
+                (n.parent_node_id === null || n.parent_node_id === undefined) &&
+                (n.tier === 1 || n.tier === null),
             );
             return tier1Nodes.map(node => ({ ...item, node }));
           } catch {
@@ -413,7 +431,7 @@ https://aifix.com/signup
   };
 
   const handleAddSender = () => {
-    setRecipients(prev => [...prev, { company: '', email: '', contactName: '' }]);
+    setRecipients((prev) => [...prev, { company: '', email: '', contactName: '', scopeId: undefined }]);
   };
 
   const handleSend = async () => {
@@ -493,7 +511,7 @@ https://aifix.com/signup
     }
     if (success > 0) {
       toast.success(`${success}건 초대 메일 발송 완료`);
-      setRecipients([{ company: '', email: '', contactName: '' }]);
+      setRecipients([{ company: '', email: '', contactName: '', scopeId: undefined }]);
       try {
         const rows = await getInvitationHistory({ limit: 50 });
         const mapped = rows.map((r: InvitationHistoryItem) => ({
@@ -609,11 +627,12 @@ https://aifix.com/signup
             company: matched?.name ?? company.trim(),
             email: email.trim(),
             contactName: contactName.trim() || '-',
+            scopeId: matched?.id,
           });
           successCount++;
         }
 
-        setRecipients(next.length > 0 ? next : [{ company: '', email: '', contactName: '' }]);
+        setRecipients(next.length > 0 ? next : [{ company: '', email: '', contactName: '', scopeId: undefined }]);
         toast.success(`CSV 업로드 완료: 성공 ${successCount}건, 스킵 ${skippedCount}건`);
       } catch {
         toast.error('CSV 파싱에 실패했습니다');
@@ -714,30 +733,36 @@ https://aifix.com/signup
     }
   };
 
-  return (
-    <div className="space-y-8">
-      {/* 페이지 헤더 */}
-      <div>
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-3xl font-bold text-gray-900 mb-2">협력사 초대</h1>
-            <p className="text-gray-600">1차 협력사에게 회원가입 안내 메일을 발송하세요</p>
-          </div>
-          
-          {/* ESG 직무 View Only 배지 */}
-          {mode === 'pcf' && (
-            <div className="flex items-center gap-2 px-4 py-2 bg-blue-50 border-2 border-blue-300 rounded-xl">
-              <ShieldAlert className="w-5 h-5 text-blue-600" />
-              <span className="text-sm font-semibold text-blue-700">View Only – PCF 담당자 권한</span>
-            </div>
-          )}
-        </div>
-      </div>
+  const panelScroll =
+    embedded ? 'min-h-0 max-h-[min(70vh,calc(90vh-11rem))] overflow-y-auto' : '';
+  const gridClass = embedded
+    ? 'grid grid-cols-1 lg:grid-cols-2 gap-4 flex-1 min-h-0'
+    : 'grid grid-cols-2 gap-6';
 
-      <div className="grid grid-cols-2 gap-6">
+  return (
+    <div className={embedded ? 'flex flex-col h-full min-h-0' : 'space-y-8'}>
+      {!embedded && (
+        <div>
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-3xl font-bold text-gray-900 mb-2">협력사 초대</h1>
+              <p className="text-gray-600">1차 협력사에게 회원가입 안내 메일을 발송하세요</p>
+            </div>
+
+            {mode === 'pcf' && (
+              <div className="flex items-center gap-2 px-4 py-2 bg-blue-50 border-2 border-blue-300 rounded-xl">
+                <ShieldAlert className="w-5 h-5 text-blue-600" />
+                <span className="text-sm font-semibold text-blue-700">View Only – PCF 담당자 권한</span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      <div className={gridClass}>
         {/* 좌측: 메일 작성 영역 */}
         <div
-          className="bg-white p-6"
+          className={`bg-white p-6 ${panelScroll}`}
           style={{
             borderRadius: '20px',
             boxShadow: '0px 4px 16px rgba(0,0,0,0.05)',
@@ -779,13 +804,14 @@ https://aifix.com/signup
                       recipient={recipient}
                       eligibleTier1Suppliers={eligibleTier1Suppliers}
                       supplierEmailById={supplierEmailById}
+                      suppliersLoading={loadingSuppliers}
                       onChange={(next) => {
                         setRecipients(prev => prev.map((r, i) => (i === idx ? next : r)));
                       }}
                       onRemove={() => {
                         setRecipients(prev => {
                           const next = prev.filter((_, i) => i !== idx);
-                          return next.length > 0 ? next : [{ company: '', email: '', contactName: '' }];
+                          return next.length > 0 ? next : [{ company: '', email: '', contactName: '', scopeId: undefined }];
                         });
                       }}
                     />
@@ -906,7 +932,7 @@ https://aifix.com/signup
 
         {/* 우측: 발송 기록 */}
         <div
-          className="bg-white p-6"
+          className={`bg-white p-6 ${panelScroll}`}
           style={{
             borderRadius: '20px',
             boxShadow: '0px 4px 16px rgba(0,0,0,0.05)',

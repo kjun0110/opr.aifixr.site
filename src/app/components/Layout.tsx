@@ -13,7 +13,8 @@ import {
 } from './ui/dropdown-menu';
 
 export default function Layout({ children }: { children: React.ReactNode }) {
-  const { mode, toggleMode, isPurchasePerspectiveLocked } = useMode();
+  const { mode, toggleMode, isPurchasePerspectiveLocked, isEsgPerspectiveLocked } =
+    useMode();
   const pathname = usePathname();
   const router = useRouter();
 
@@ -26,7 +27,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   // Base navigation items (always visible)
   const baseNavItems = [
     { path: '/dashboard', label: '대시보드' },
-    { path: '/dashboard/invite', label: '초대' },
+    { path: '/dashboard/if-outlier', label: 'I/F' },
     { path: '/dashboard/data-view', label: '데이터 관리' },
     { path: '/dashboard/simulation', label: '시뮬레이션' },
     { path: '/dashboard/data-contract', label: '제3자 제공 동의서' },
@@ -43,10 +44,29 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     { path: '/dashboard/pcf-calculation', label: 'PCF 산정' },
   ];
 
-  // Combine nav items based on mode (PCF 산정 탭은 항상 노출, 구매 직무에서 클릭 시 블러)
-  const navItems = mode === 'pcf' 
-    ? [baseNavItems[0], { path: '/dashboard/project-supply-chain', label: '프로젝트 / 공급망' }, ...baseNavItems.slice(1, 3), ...pcfNavItems, ...baseNavItems.slice(3)]
-    : [baseNavItems[0], ...procurementNavItems, ...baseNavItems.slice(1, 3), ...pcfNavItems, ...baseNavItems.slice(3)];
+  // Combine nav items based on mode (PCF 산정 탭은 항상 노출, 구매 직무에서 클릭 시 블러). 초대는 공급망 모달에서만.
+  const projectSupplyChainItem = {
+    path: '/dashboard/project-supply-chain',
+    label: '프로젝트 / 공급망',
+  } as const;
+  const navItems =
+    mode === 'pcf'
+      ? [
+          baseNavItems[0],
+          projectSupplyChainItem,
+          baseNavItems[1],
+          baseNavItems[2],
+          ...pcfNavItems,
+          ...baseNavItems.slice(3),
+        ]
+      : [
+          baseNavItems[0],
+          ...procurementNavItems,
+          baseNavItems[1],
+          baseNavItems[2],
+          ...pcfNavItems,
+          ...baseNavItems.slice(3),
+        ];
   
   return (
     <div className="min-h-screen bg-gray-50">
@@ -91,12 +111,28 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               <div className="flex items-center bg-gray-100 rounded-lg p-1">
                 <button
                   type="button"
-                  onClick={() => mode !== 'procurement' && toggleMode()}
+                  onClick={() =>
+                    !isEsgPerspectiveLocked &&
+                    mode !== 'procurement' &&
+                    toggleMode()
+                  }
+                  disabled={isEsgPerspectiveLocked}
+                  title={
+                    isEsgPerspectiveLocked
+                      ? 'ESG 직무 계정은 구매 직무로 전환할 수 없습니다.'
+                      : undefined
+                  }
                   className={`px-4 py-2 rounded-md text-base font-medium transition-all ${
                     mode === 'procurement'
                       ? 'bg-white text-[#5B3BFA] shadow-sm'
                       : 'text-gray-600 hover:text-gray-900'
-                  } ${isPurchasePerspectiveLocked ? 'cursor-default' : ''}`}
+                  } ${
+                    isPurchasePerspectiveLocked ? 'cursor-default' : ''
+                  } ${
+                    isEsgPerspectiveLocked
+                      ? 'opacity-50 cursor-not-allowed text-gray-400 hover:text-gray-400'
+                      : ''
+                  }`}
                 >
                   구매 직무
                 </button>

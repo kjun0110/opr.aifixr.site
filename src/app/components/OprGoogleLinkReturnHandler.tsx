@@ -5,9 +5,12 @@ import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { OPR_GOOGLE_LINK_RETURN_STORAGE_KEY } from "@/lib/api/oprGoogleLink";
 
+/** 저장된 복귀 경로가 없을 때 — 초대 모달이 있는 공급망 화면 */
+const OPR_GOOGLE_LINK_FALLBACK_RETURN = "/dashboard/project-supply-chain?tier1Invite=1";
+
 /**
  * 게이트웨이 `frontend-after-link`에 `?google_linked=1` 이 붙어 돌아왔을 때,
- * 연동 시작 전에 저장한 경로(예: /dashboard/invite)로 되돌립니다.
+ * 연동 시작 전에 저장한 경로(예: 공급망 + 초대 모달 재오픈 쿼리)로 되돌립니다.
  */
 export function OprGoogleLinkReturnHandler() {
   const router = useRouter();
@@ -28,7 +31,7 @@ export function OprGoogleLinkReturnHandler() {
       router.replace(ret);
       return;
     }
-    router.replace("/dashboard/invite");
+    router.replace(OPR_GOOGLE_LINK_FALLBACK_RETURN);
   }, [router]);
 
   return null;
