@@ -4,6 +4,10 @@ import { useMemo, useState, useEffect } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { ArrowLeft, Building2, MapPin, Package, TrendingUp, AlertTriangle, Download, Lock, Send } from 'lucide-react';
 import { toast } from 'sonner';
+import {
+  loadSupplierDetailSnapshot,
+  type SupplierDetailSnapshot,
+} from '@/lib/dataViewSupplierSnapshot';
 
 // Mock Supplier company data
 interface SupplierDetailData {
@@ -577,6 +581,58 @@ const mockSupplierData: Record<string, SupplierDetailData> = {
   })(),
 };
 
+function normalizeSupplierTier(raw: string): SupplierDetailData['tier'] {
+  if (raw === 'Tier 1' || raw === 'Tier 2' || raw === 'Tier 3') return raw;
+  if (raw === 'Tier 0') return 'Tier 1';
+  const m = /^Tier\s*(\d+)/i.exec(raw);
+  if (m) {
+    const n = Math.min(3, Math.max(1, parseInt(m[1], 10)));
+    return `Tier ${n}` as SupplierDetailData['tier'];
+  }
+  return 'Tier 1';
+}
+
+/** API·목록에서 넘긴 스냅샷 → 기존 상세 UI용 데이터 (미입력 필드는 템플릿 기본값) */
+function snapshotToSupplierDetailData(id: string, s: SupplierDetailSnapshot): SupplierDetailData {
+  const base = baseTier1P1Data;
+  const name = s.companyName?.trim() || '이름 미등록 협력사';
+  const nameEn = s.companyNameEn?.trim() || '';
+  const tier = normalizeSupplierTier(s.tier);
+  return {
+    ...base,
+    id,
+    companyName: name,
+    companyNameEn: nameEn,
+    tier,
+    country: s.country?.trim() || '-',
+    productType: s.productType?.trim() || '-',
+    pcfResult: s.pcfResult,
+    status: s.status?.trim() || '목록에서 조회',
+    organizationInfo: {
+      ...base.organizationInfo,
+      companyName: nameEn ? `${name} (${nameEn})` : name,
+      country: s.country?.trim() || '-',
+    },
+  };
+}
+
+function resolveSupplierCompany(companyKey: string | undefined): SupplierDetailData | null {
+  if (!companyKey) return null;
+  if (mockSupplierData[companyKey]) return mockSupplierData[companyKey];
+  const patternToKey: [string, string][] = [
+    ['-tier1-1', 'tier1-1'], ['-tier1-2', 'tier1-2'], ['-tier1-3', 'tier1-3'],
+    ['-tier2-1', 'tier2-1'], ['-tier2-2', 'tier2-2'], ['-tier2-3', 'tier2-3'], ['-tier2-4', 'tier2-4'], ['-tier2-5', 'tier2-5'],
+    ['-tier3-1', 'tier3-1'], ['-tier3-2', 'tier3-2'],
+    ['-tier1-p1-1', 'tier1-p1-1'], ['-tier1-p1-2', 'tier1-p1-2'], ['-tier2-p1-1', 'tier2-p1-1'], ['-tier3-p1-1', 'tier3-p1-1'],
+  ];
+  for (const [pat, key] of patternToKey) {
+    if (companyKey.includes(pat) && mockSupplierData[key]) return { ...mockSupplierData[key], id: companyKey };
+  }
+  const snap = loadSupplierDetailSnapshot(companyKey);
+  if (snap) return snapshotToSupplierDetailData(companyKey, snap);
+  return null;
+}
+
 export default function SupplierDetail() {
   const { companyId } = useParams();
   const router = useRouter();
@@ -585,32 +641,15 @@ export default function SupplierDetail() {
   const [requestArea, setRequestArea] = useState('');
   const [requestMessage, setRequestMessage] = useState('');
   const [parentCompanyName, setParentCompanyName] = useState<string>('-');
-  
+
   const companyKey = Array.isArray(companyId) ? companyId[0] : companyId;
-  // DataView 새 구조(card-xxx-month-tier1-1 등) 지원: ID 패턴별 mock 매핑
-  const getCompanyWithFallback = () => {
-    if (!companyKey) return null;
-    if (mockSupplierData[companyKey]) return mockSupplierData[companyKey];
-    const patternToKey: [string, string][] = [
-      ['-tier1-1', 'tier1-1'], ['-tier1-2', 'tier1-2'], ['-tier1-3', 'tier1-3'],
-      ['-tier2-1', 'tier2-1'], ['-tier2-2', 'tier2-2'], ['-tier2-3', 'tier2-3'], ['-tier2-4', 'tier2-4'], ['-tier2-5', 'tier2-5'],
-      ['-tier3-1', 'tier3-1'], ['-tier3-2', 'tier3-2'],
-      ['-tier1-p1-1', 'tier1-p1-1'], ['-tier1-p1-2', 'tier1-p1-2'], ['-tier2-p1-1', 'tier2-p1-1'], ['-tier3-p1-1', 'tier3-p1-1'],
-    ];
-    for (const [pat, key] of patternToKey) {
-      if (companyKey.includes(pat) && mockSupplierData[key]) return { ...mockSupplierData[key], id: companyKey };
-    }
-    return null;
-  };
-  const company = getCompanyWithFallback();
-  
-  if (!company) {
-    return (
-      <div className="p-6">
-        <p className="text-gray-600">회사 정보를 찾을 수 없습니다.</p>
-      </div>
-    );
-  }
+  const [company, setCompany] = useState<SupplierDetailData | null>(null);
+  const [resolved, setResolved] = useState(false);
+
+  useEffect(() => {
+    setCompany(resolveSupplierCompany(companyKey));
+    setResolved(true);
+  }, [companyKey]);
 
   useEffect(() => {
     try {
@@ -620,7 +659,138 @@ export default function SupplierDetail() {
       setParentCompanyName('-');
     }
   }, []);
-  
+
+  useEffect(() => {
+    const handler = () => {
+      try {
+        sessionStorage.setItem('aifix_data_view_from_back_v1', '1');
+      } catch {
+        /* ignore */
+      }
+    };
+    window.addEventListener('popstate', handler);
+    return () => window.removeEventListener('popstate', handler);
+  }, []);
+
+  const safe = (v: unknown) => (v === null || v === undefined || v === '' ? '-' : String(v));
+  const toYesNo = (v: boolean) => (v ? '해당' : '미해당');
+  const toRmi = (v: boolean) => (v ? '인증됨' : '미인증');
+
+  const facilitiesRows = useMemo(() => {
+    if (!company) return [];
+    const reg = company.organizationInfo.businessRegistrationNumber;
+    return (company.siteInfo ?? []).map((s) => ({
+      registrationNumber: reg,
+      siteSubNumber: s.siteId,
+      name: s.siteName,
+      country: s.country,
+      address: s.address,
+      representative: s.managerName,
+      email: s.managerEmail,
+      phone: s.managerPhone,
+      rmiSmelter: toRmi(s.rmiSmelter),
+      feoc: toYesNo(s.feoc),
+    }));
+  }, [company]);
+
+  const productRows = useMemo(() => {
+    if (!company) return [];
+    return (company.productInfo ?? []).map((p) => ({
+      name: p.productName,
+      origin: p.mineralOrigin,
+      deliveryDate: '-',
+      quantity: String(p.deliveryQuantity ?? '-'),
+      unit: p.unit,
+      standardWeight: String(p.standardWeight ?? '-'),
+      wasteQuantity: '-',
+      wasteEmissionFactor: '-',
+      wasteEmissionFactorUnit: '-',
+    }));
+  }, [company]);
+
+  const materialRows = useMemo(() => {
+    if (!company) return [];
+    const first = company.productionInfo?.[0];
+    return [
+      {
+        productName: safe(company.productInfo?.[0]?.productName),
+        inputMaterialName: safe(first?.materialName),
+        inputAmount: safe(first?.inputQuantity),
+        inputAmountUnit: safe(first?.inputUnit),
+        materialEmissionFactor: '-',
+        materialEmissionFactorUnit: '-',
+        mineralType: '-',
+        mineralAmount: '-',
+        mineralOrigin: '-',
+        mineralEmissionFactor: '-',
+        mineralEmissionFactorUnit: '-',
+      },
+    ];
+  }, [company]);
+
+  const energyRows = useMemo(() => {
+    if (!company) return [];
+    const first = company.productionInfo?.[0];
+    return [
+      {
+        productName: safe(company.productInfo?.[0]?.productName),
+        energyType: safe(first?.energyType),
+        energyUsage: safe(first?.energyUsage),
+        energyUnit: safe(first?.energyUnit),
+        emissionFactor: safe(first?.emissionFactor),
+        emissionFactorUnit: '-',
+      },
+    ];
+  }, [company]);
+
+  const transportRows = useMemo(() => {
+    if (!company) return [];
+    const first = company.productionInfo?.[0];
+    return [
+      {
+        productName: safe(company.productInfo?.[0]?.productName),
+        originCountry: safe(company.country),
+        originAddress: safe(company.organizationInfo.address),
+        destinationCountry: safe(company.country),
+        destinationAddress: safe(company.organizationInfo.address),
+        transportMethod: safe(first?.transportMode),
+        transportAmount: safe(company.deliveryVolume),
+        transportAmountUnit: 'kg',
+        emissionFactor: safe(first?.emissionFactor),
+        emissionFactorUnit: '-',
+      },
+    ];
+  }, [company]);
+
+  if (!companyKey) {
+    return (
+      <div className="p-6">
+        <p className="text-gray-600">잘못된 경로입니다.</p>
+      </div>
+    );
+  }
+
+  if (!resolved) {
+    return (
+      <div className="p-6">
+        <p className="text-gray-600">불러오는 중…</p>
+      </div>
+    );
+  }
+
+  if (!company) {
+    return (
+      <div className="p-6">
+        <p className="text-gray-600">회사 정보를 찾을 수 없습니다.</p>
+        <p className="text-sm text-gray-500 mt-2 max-w-lg">
+          데이터 관리 화면에서 해당 행의 「상세보기」를 눌러 이동해 주세요. URL만 북마크하거나 새 탭에 붙여 넣으면
+          목록에서 넘긴 정보가 없어 이 메시지가 납니다. 초대 직후에는 협력사명이 DB에 아직 비어 목록에 &quot;-&quot;로
+          보일 수 있으며, 그 경우에도 상세에는 「이름 미등록 협력사」로 표시됩니다.
+        </p>
+      </div>
+    );
+  }
+
   const tabs = [
     { id: 0, name: '기업 기본정보' },
     { id: 1, name: '담당자 정보' },
@@ -655,91 +825,6 @@ export default function SupplierDetail() {
     </div>
   );
 
-  const safe = (v: unknown) => (v === null || v === undefined || v === '' ? '-' : String(v));
-  const toYesNo = (v: boolean) => (v ? '해당' : '미해당');
-  const toRmi = (v: boolean) => (v ? '인증됨' : '미인증');
-
-  const facilitiesRows = useMemo(() => {
-    const reg = company.organizationInfo.businessRegistrationNumber;
-    return (company.siteInfo ?? []).map((s) => ({
-      registrationNumber: reg,
-      siteSubNumber: s.siteId,
-      name: s.siteName,
-      country: s.country,
-      address: s.address,
-      representative: s.managerName,
-      email: s.managerEmail,
-      phone: s.managerPhone,
-      rmiSmelter: toRmi(s.rmiSmelter),
-      feoc: toYesNo(s.feoc),
-    }));
-  }, [company.organizationInfo.businessRegistrationNumber, company.siteInfo]);
-
-  const productRows = useMemo(() => {
-    return (company.productInfo ?? []).map((p) => ({
-      name: p.productName,
-      origin: p.mineralOrigin,
-      deliveryDate: '-',
-      quantity: String(p.deliveryQuantity ?? '-'),
-      unit: p.unit,
-      standardWeight: String(p.standardWeight ?? '-'),
-      wasteQuantity: '-',
-      wasteEmissionFactor: '-',
-      wasteEmissionFactorUnit: '-',
-    }));
-  }, [company.productInfo]);
-
-  const materialRows = useMemo(() => {
-    const first = company.productionInfo?.[0];
-    return [
-      {
-        productName: safe(company.productInfo?.[0]?.productName),
-        inputMaterialName: safe(first?.materialName),
-        inputAmount: safe(first?.inputQuantity),
-        inputAmountUnit: safe(first?.inputUnit),
-        materialEmissionFactor: '-',
-        materialEmissionFactorUnit: '-',
-        mineralType: '-',
-        mineralAmount: '-',
-        mineralOrigin: '-',
-        mineralEmissionFactor: '-',
-        mineralEmissionFactorUnit: '-',
-      },
-    ];
-  }, [company.productInfo, company.productionInfo]);
-
-  const energyRows = useMemo(() => {
-    const first = company.productionInfo?.[0];
-    return [
-      {
-        productName: safe(company.productInfo?.[0]?.productName),
-        energyType: safe(first?.energyType),
-        energyUsage: safe(first?.energyUsage),
-        energyUnit: safe(first?.energyUnit),
-        emissionFactor: safe(first?.emissionFactor),
-        emissionFactorUnit: '-',
-      },
-    ];
-  }, [company.productInfo, company.productionInfo]);
-
-  const transportRows = useMemo(() => {
-    const first = company.productionInfo?.[0];
-    return [
-      {
-        productName: safe(company.productInfo?.[0]?.productName),
-        originCountry: safe(company.country),
-        originAddress: safe(company.organizationInfo.address),
-        destinationCountry: safe(company.country),
-        destinationAddress: safe(company.organizationInfo.address),
-        transportMethod: safe(first?.transportMode),
-        transportAmount: safe(company.deliveryVolume),
-        transportAmountUnit: 'kg',
-        emissionFactor: safe(first?.emissionFactor),
-        emissionFactorUnit: '-',
-      },
-    ];
-  }, [company.country, company.deliveryVolume, company.organizationInfo.address, company.productInfo, company.productionInfo]);
-
   const handleExcelDownload = () => {
     toast.success('Excel 파일을 다운로드합니다');
   };
@@ -754,19 +839,6 @@ export default function SupplierDetail() {
     setRequestArea('');
     setRequestMessage('');
   };
-
-  // 뒤로가기 시 조회조건 복원을 위한 플래그 (popstate = 브라우저 뒤로가기)
-  useEffect(() => {
-    const handler = () => {
-      try {
-        sessionStorage.setItem('aifix_data_view_from_back_v1', '1');
-      } catch {
-        /* ignore */
-      }
-    };
-    window.addEventListener('popstate', handler);
-    return () => window.removeEventListener('popstate', handler);
-  }, []);
 
   const handleBack = () => {
     try {

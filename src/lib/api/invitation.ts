@@ -12,6 +12,7 @@ export async function getInvitationHealth(): Promise<{
 }
 
 export type OprInvitePayload = {
+  project_id: number;
   product_variant_id: number;
   supplier_id: number;
   invitee: {

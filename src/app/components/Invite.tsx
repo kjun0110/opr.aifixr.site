@@ -35,10 +35,10 @@ type Tier1Supplier = {
   productVariantId?: number;
 };
 
-/** 협력사 초대 모달과 동일하게 — 이름 뒤 괄호 보조표기 (코드 없으면 공급망 등록) */
+/** 1차 협력사 선택: 협력사명(코드) + 등록완료만 표시 (내부 id는 프로젝트·세부제품 스코프 유지) */
 function formatOprTier1OptionLabel(s: Tier1Supplier): string {
   const tag = s.nameEn?.trim() ? s.nameEn.trim() : '공급망 등록';
-  return `${s.name} (${tag})`;
+  return `${s.name} (${tag}) 등록완료`;
 }
 
 type RecipientCardProps = {
@@ -289,51 +289,31 @@ https://aifix.com/signup
         });
         const allNodesNested = await Promise.all(allNodesPromises);
         const allNodes = allNodesNested.flat();
-        
-        // 중복 제거 및 Code 우선 선택
+
+        // 프로젝트·세부제품·협력사 조합마다 별도 행 (회사명만으로 합치면 project_id/React key가 꼬임)
+        const seenIds = new Set<string>();
         const allTier1: Tier1Supplier[] = [];
-        
+
         for (const item of allNodes) {
           const node = item.node;
-          const normalizedName = node.supplier_name?.trim().toLowerCase();
-          if (normalizedName) {
-            const existingIndex = allTier1.findIndex(t => t.name.trim().toLowerCase() === normalizedName);
-            
-            if (existingIndex === -1) {
-              // 새로운 회사명이면 추가
-              const compositeId = `${item.project.id}:${item.product.id}:${item.variant.id}:${node.supplier_id}`;
-              allTier1.push({
-                id: compositeId,
-                name: node.supplier_name,
-                nameEn: node.supplier_code || undefined,
-                supplierId: node.supplier_id,
-                projectId: item.project.id,
-                productId: item.product.id,
-                productVariantId: item.variant.id,
-              });
-            } else {
-              // 이미 존재하는 회사명이면, Code가 있는 것으로 교체
-              const existing = allTier1[existingIndex];
-              const hasCode = node.supplier_code && node.supplier_code.trim();
-              const existingHasCode = existing.nameEn && existing.nameEn.trim();
-              
-              if (hasCode && !existingHasCode) {
-                // 새로운 노드에 Code가 있고 기존 것에는 없으면 교체
-                const compositeId = `${item.project.id}:${item.product.id}:${item.variant.id}:${node.supplier_id}`;
-                allTier1[existingIndex] = {
-                  id: compositeId,
-                  name: node.supplier_name,
-                  nameEn: node.supplier_code || undefined,
-                  supplierId: node.supplier_id,
-                  projectId: item.project.id,
-                  productId: item.product.id,
-                  productVariantId: item.variant.id,
-                };
-              }
-            }
-          }
+          const name = node.supplier_name?.trim();
+          if (!name || node.supplier_id == null) continue;
+
+          const compositeId = `${item.project.id}:${item.product.id}:${item.variant.id}:${node.supplier_id}`;
+          if (seenIds.has(compositeId)) continue;
+          seenIds.add(compositeId);
+
+          allTier1.push({
+            id: compositeId,
+            name,
+            nameEn: node.supplier_code || undefined,
+            supplierId: node.supplier_id,
+            projectId: item.project.id,
+            productId: item.product.id,
+            productVariantId: item.variant.id,
+          });
         }
-        
+
         if (mounted) {
           setEligibleTier1Suppliers(allTier1);
         }
@@ -476,9 +456,10 @@ https://aifix.com/signup
     
     for (const r of nonEmptyCards) {
       const matched = normalizeTier1Company(r.company, r.scopeId);
-      if (!matched?.supplierId || !matched.productVariantId) continue;
+      if (!matched?.supplierId || !matched.productVariantId || !matched.projectId) continue;
       try {
         await postOprInvitation({
+          project_id: matched.projectId,
           product_variant_id: matched.productVariantId,
           supplier_id: matched.supplierId,
           invitee: {

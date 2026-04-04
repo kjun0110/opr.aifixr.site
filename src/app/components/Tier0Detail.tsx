@@ -1,6 +1,16 @@
 'use client';
 
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
+import { createPortal } from 'react-dom';
+import { restoreOprSessionFromCookie } from '@/lib/api/client';
+import { getOprAccessToken } from '@/lib/api/sessionAccessToken';
+import {
+  getOprAnchorCompany,
+  getOprTier0RowContext,
+  type OprAnchorCompanyResponse,
+  type OprTier0RowContextResponse,
+} from '@/lib/api/dataMgmtOpr';
+import { getOprDataViewContacts, type OprDataViewContactRow } from '@/lib/api/iamOpr';
 import { useParams, useRouter } from 'next/navigation';
 import {
   AlertTriangle,
@@ -59,6 +69,10 @@ interface Tier0DetailData {
     processName: string;
     renewableEnergy: boolean;
     environmentalCertification: string;
+    /** DB 사업장 행: 종사업장번호 */
+    workplaceNo?: string;
+    /** DB 사업장 행: 사업장 단위 사업자등록번호 */
+    businessRegNo?: string;
   }[];
   
   materialInfo: {
@@ -77,6 +91,8 @@ interface Tier0DetailData {
     standardProduction: number;
     installationYear: number;
     energyType: string;
+    /** 행별 사업장명(opr_equipments → workplace); 없으면 설비 탭에서 첫 사업장 등으로 폴백 */
+    siteName?: string;
   }[];
   
   contactInfo: {
@@ -457,6 +473,29 @@ const mockTier0Data: Record<string, Tier0DetailData> = {
   },
 };
 
+/** DataView 카드: `card-{cust_branch_id}-{product_variant_id}-{idx}-{YYYY-MM}-tier0` */
+function parseDataViewTier0CardKey(rawKey: string): {
+  custBranchId: number;
+  productVariantId: number;
+  cardIdx: number;
+  yearMonth: string;
+} | null {
+  let decoded = rawKey;
+  try {
+    decoded = decodeURIComponent(rawKey);
+  } catch {
+    /* keep rawKey */
+  }
+  const m = decoded.match(/^card-(\d+)-(\d+)-(\d+)-(\d{4}-\d{2})-tier0$/);
+  if (!m) return null;
+  return {
+    custBranchId: parseInt(m[1], 10),
+    productVariantId: parseInt(m[2], 10),
+    cardIdx: parseInt(m[3], 10),
+    yearMonth: m[4],
+  };
+}
+
 export default function Tier0Detail() {
   const { companyId } = useParams();
   const router = useRouter();
@@ -532,11 +571,221 @@ export default function Tier0Detail() {
   } | null>(null);
   
   const companyKey = Array.isArray(companyId) ? companyId[0] : companyId;
-  // DataView 새 구조(card-xxx-month-tier0) 지원: mock에 없으면 기본 원청사 데이터 사용
-  const company = companyKey
-    ? (mockTier0Data[companyKey] ?? (companyKey.endsWith('-tier0') ? { ...mockTier0Data['tier0-p1'], id: companyKey, companyName: '우리회사', organizationInfo: { ...mockTier0Data['tier0-p1'].organizationInfo, companyName: '우리회사' } } : null))
+  const isDataViewTier0Card =
+    typeof companyKey === 'string' && parseDataViewTier0CardKey(companyKey) !== null;
+  // DataView 새 구조(card-xxx-month-tier0) 지원: mock에 없으면 플레이스홀더(회사명은 DB에서 덮어씀)
+  const baseCompany = companyKey
+    ? (mockTier0Data[companyKey] ??
+        (companyKey.endsWith('-tier0')
+          ? {
+              ...mockTier0Data['tier0-p1'],
+              id: companyKey,
+              companyName: '우리회사',
+              // 데이터뷰 Tier0: 사업장·설비는 tier0-row-context(DB)만 사용
+              siteInfo: isDataViewTier0Card ? [] : mockTier0Data['tier0-p1'].siteInfo,
+              facilityInfo: isDataViewTier0Card ? [] : mockTier0Data['tier0-p1'].facilityInfo,
+              // 공정명 콤보는 processPerformanceInfo에서도 후보를 모으므로 mock 공정이 섞이지 않게 비움
+              processPerformanceInfo: isDataViewTier0Card
+                ? []
+                : mockTier0Data['tier0-p1'].processPerformanceInfo,
+              organizationInfo: {
+                ...mockTier0Data['tier0-p1'].organizationInfo,
+                companyName: '우리회사',
+              },
+            }
+          : null))
     : null;
-  
+
+  const [anchorOprCompany, setAnchorOprCompany] = useState<OprAnchorCompanyResponse | null>(null);
+  const [tier0RowContext, setTier0RowContext] = useState<OprTier0RowContextResponse | null>(null);
+  const [tier0RowFetched, setTier0RowFetched] = useState(false);
+  const [oprDataViewContacts, setOprDataViewContacts] = useState<OprDataViewContactRow[] | null>(
+    null,
+  );
+
+  useEffect(() => {
+    const key = typeof companyKey === 'string' ? companyKey : String(companyKey ?? '');
+    if (!key.endsWith('-tier0')) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        if (typeof window !== 'undefined' && !getOprAccessToken()) {
+          await restoreOprSessionFromCookie();
+        }
+        const data = await getOprAnchorCompany();
+        if (!cancelled) setAnchorOprCompany(data);
+      } catch {
+        if (!cancelled) setAnchorOprCompany(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [companyKey]);
+
+  useEffect(() => {
+    const key = typeof companyKey === 'string' ? companyKey : String(companyKey ?? '');
+    const parsed = parseDataViewTier0CardKey(key);
+    if (!parsed) {
+      setTier0RowContext(null);
+      setTier0RowFetched(false);
+      return;
+    }
+    setTier0RowFetched(false);
+    let cancelled = false;
+    void (async () => {
+      try {
+        if (typeof window !== 'undefined' && !getOprAccessToken()) {
+          await restoreOprSessionFromCookie();
+        }
+        const data = await getOprTier0RowContext(parsed.custBranchId, parsed.productVariantId);
+        if (!cancelled) setTier0RowContext(data);
+      } catch {
+        if (!cancelled) setTier0RowContext(null);
+      } finally {
+        if (!cancelled) setTier0RowFetched(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [companyKey]);
+
+  useEffect(() => {
+    if (!isDataViewTier0Card) {
+      setOprDataViewContacts(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        if (typeof window !== 'undefined' && !getOprAccessToken()) {
+          await restoreOprSessionFromCookie();
+        }
+        const data = await getOprDataViewContacts();
+        if (!cancelled) setOprDataViewContacts(data.rows ?? []);
+      } catch {
+        if (!cancelled) setOprDataViewContacts([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isDataViewTier0Card]);
+
+  const pickAnchor = (rec: OprAnchorCompanyResponse, k: keyof OprAnchorCompanyResponse, camel: string): string | null | undefined => {
+    const raw = rec[k] ?? (rec as unknown as Record<string, unknown>)[camel];
+    if (raw == null) return undefined;
+    const s = String(raw).trim();
+    return s === '' ? undefined : s;
+  };
+
+  const company = useMemo(() => {
+    if (!baseCompany) return null;
+    const key = typeof companyKey === 'string' ? companyKey : String(companyKey ?? '');
+    if (!key.endsWith('-tier0')) return baseCompany;
+
+    let merged: Tier0DetailData = { ...baseCompany };
+
+    if (anchorOprCompany) {
+      const org = anchorOprCompany;
+      const cn =
+        pickAnchor(org, 'company_name', 'companyName') ?? merged.companyName;
+      merged = {
+        ...merged,
+        companyName: cn,
+        organizationInfo: {
+          ...merged.organizationInfo,
+          companyName: pickAnchor(org, 'company_name', 'companyName') ?? merged.organizationInfo.companyName,
+          businessRegistrationNumber:
+            pickAnchor(org, 'business_reg_no', 'businessRegNo') ??
+            merged.organizationInfo.businessRegistrationNumber,
+          country: pickAnchor(org, 'country', 'country') ?? merged.organizationInfo.country,
+          address: pickAnchor(org, 'address', 'address') ?? merged.organizationInfo.address,
+          dunsNumber: pickAnchor(org, 'duns_number', 'dunsNumber') ?? merged.organizationInfo.dunsNumber,
+          taxId: pickAnchor(org, 'tax_id', 'taxId') ?? merged.organizationInfo.taxId,
+          website: pickAnchor(org, 'website_url', 'websiteUrl') ?? merged.organizationInfo.website,
+          ceoName: pickAnchor(org, 'rep_name', 'repName') ?? merged.organizationInfo.ceoName,
+          ceoEmail: pickAnchor(org, 'rep_email', 'repEmail') ?? merged.organizationInfo.ceoEmail,
+          ceoPhone: pickAnchor(org, 'rep_contact', 'repContact') ?? merged.organizationInfo.ceoPhone,
+        },
+      };
+    }
+
+    if (tier0RowContext) {
+      merged = {
+        ...merged,
+        productType: tier0RowContext.product_variant_name || merged.productType,
+      };
+    }
+
+    const dataViewTier = parseDataViewTier0CardKey(key);
+    if (dataViewTier) {
+      if (tier0RowFetched) {
+        const rows =
+          tier0RowContext?.workplaces.map((w, i) => ({
+            siteId: `wp-${w.workplace_no ?? i}-${i}`,
+            siteName: w.workplace_name,
+            country: w.country ?? '',
+            address: w.address ?? '',
+            managerName: w.rep_name ?? '',
+            managerEmail: w.rep_email ?? '',
+            managerPhone: w.rep_contact ?? '',
+            processName: '',
+            renewableEnergy: false,
+            environmentalCertification: '',
+            workplaceNo: w.workplace_no ?? undefined,
+            businessRegNo: w.business_reg_no ?? undefined,
+          })) ?? [];
+        const equipRows = tier0RowContext?.equipments ?? [];
+        merged = {
+          ...merged,
+          siteInfo: rows,
+          facilityInfo: equipRows.map((e) => ({
+            siteName: e.workplace_name,
+            processName: e.process_name ?? '',
+            facilityNumber: e.equipment_no,
+            facilityName: e.equipment_name,
+            energyType: e.equipment_type ?? '',
+            maxOutput: 0,
+            standardProduction: 0,
+            installationYear: 0,
+          })),
+        };
+      } else {
+        merged = { ...merged, siteInfo: [], facilityInfo: [] };
+      }
+    }
+
+    if (isDataViewTier0Card) {
+      if (oprDataViewContacts !== null) {
+        merged = {
+          ...merged,
+          contactInfo: oprDataViewContacts.map((r) => ({
+            employeeId: (r.employee_id && String(r.employee_id).trim()) || `OPR-${r.user_id}`,
+            department: (r.department_name && String(r.department_name).trim()) || '',
+            position: (r.position && String(r.position).trim()) || '',
+            name: r.name || '',
+            email: (r.email && String(r.email).trim()) || '',
+            phone: (r.contact && String(r.contact).trim()) || '',
+          })),
+        };
+      } else {
+        merged = { ...merged, contactInfo: [] };
+      }
+    }
+
+    return merged;
+  }, [
+    baseCompany,
+    companyKey,
+    anchorOprCompany,
+    tier0RowContext,
+    tier0RowFetched,
+    isDataViewTier0Card,
+    oprDataViewContacts,
+  ]);
+
   if (!company) {
     return (
       <div className="p-6">
@@ -555,7 +804,18 @@ export default function Tier0Detail() {
     }
   })();
 
+  const tier0CardParsed = parseDataViewTier0CardKey(decodedCompanyId);
+
   const parsedHeaderFromCompanyId = (() => {
+    if (tier0CardParsed) {
+      return {
+        yearMonth: tier0CardParsed.yearMonth,
+        customer: '',
+        branch: '',
+        product: '',
+        detailProduct: '',
+      };
+    }
     const monthMatch = decodedCompanyId.match(/(\d{4}-\d{2})-tier0$/);
     const yearMonth = monthMatch?.[1] ?? '';
 
@@ -569,14 +829,12 @@ export default function Tier0Detail() {
     }
 
     const tokens = withoutMonth.slice(cardPrefix.length).split('-');
-    // 마지막 토큰은 인덱스(i)
     const idxToken = tokens.pop();
     const customer = tokens[0] ?? '';
     const branch = tokens[1] ?? '';
     const product = tokens[2] ?? '';
     const detailProduct = tokens.slice(3).join('-');
 
-    // idxToken은 UI에 필요 없지만, 파싱 유효성 체크용으로만 사용
     const valid = typeof idxToken === 'string' && idxToken.length > 0;
     return { yearMonth: valid ? yearMonth : '', customer, branch, product, detailProduct };
   })();
@@ -597,19 +855,42 @@ export default function Tier0Detail() {
       ? `${String(sessionHeader.selectedPeriodStart).replace('-', '.')} ~ ${String(sessionHeader.selectedPeriodEnd).replace('-', '.')}`
       : '');
 
-  const mBomLabel = String(sessionHeader.selectedBomCode ?? '').trim();
+  const mBomLabel = String(
+    tier0RowContext?.bom_code ?? sessionHeader.selectedBomCode ?? '',
+  ).trim();
 
   const formatYmSlash = (ym: string) => (ym ? ym.replace('-', '/') : '');
   const formatYmDot = (ym: string) => (ym ? ym.replace('-', '.') : '');
   const formatDeliveryDate = (ym: string) => (ym ? `${formatYmDot(ym)}.01` : '');
+  const formatProjectMonthRange = (start: string, end: string) => {
+    const s = (start ?? '').slice(0, 7).replace('-', '.');
+    const e = (end ?? '').slice(0, 7).replace('-', '.');
+    return s && e ? `${s} - ${e}` : '';
+  };
 
-  const customerLabel = parsedHeaderFromCompanyId.customer || String(sessionHeader.selectedCustomer ?? '');
-  const branchLabel = parsedHeaderFromCompanyId.branch || String(sessionHeader.selectedBranch ?? '');
-  const productLabel = parsedHeaderFromCompanyId.product || String(sessionHeader.selectedProduct ?? '');
+  const customerLabel =
+    tier0RowContext?.customer_name ||
+    parsedHeaderFromCompanyId.customer ||
+    String(sessionHeader.selectedCustomer ?? '');
+  const branchLabel =
+    tier0RowContext?.branch_name ||
+    parsedHeaderFromCompanyId.branch ||
+    String(sessionHeader.selectedBranch ?? '');
+  const productLabel =
+    tier0RowContext?.product_name ||
+    parsedHeaderFromCompanyId.product ||
+    String(sessionHeader.selectedProduct ?? '');
   const detailProductLabel =
-    parsedHeaderFromCompanyId.detailProduct || String(sessionHeader.selectedDetailProduct ?? '');
+    tier0RowContext?.product_variant_name ||
+    parsedHeaderFromCompanyId.detailProduct ||
+    String(sessionHeader.selectedDetailProduct ?? '');
 
-  const contractPeriodLabel = contractPeriodLabelFromSession || '-';
+  const contractPeriodLabel =
+    (tier0RowContext
+      ? formatProjectMonthRange(tier0RowContext.project_start, tier0RowContext.project_end)
+      : '') ||
+    contractPeriodLabelFromSession ||
+    '-';
   const yearMonthLabel = parsedHeaderFromCompanyId.yearMonth ? formatYmSlash(parsedHeaderFromCompanyId.yearMonth) : '-';
   const deliveryDateLabel = parsedHeaderFromCompanyId.yearMonth ? formatDeliveryDate(parsedHeaderFromCompanyId.yearMonth) : '-';
 
@@ -628,10 +909,10 @@ export default function Tier0Detail() {
   ];
 
   // 구매 직무: 전체 탭 잠금
-  // ESG 직무: 앞 3개(사업장/원청직원/설비) 잠금, 뒤 4개 수정 가능
+  // ESG 직무: 앞 3개(사업장/담당자/설비) 인터페이스 조회 전용 잠금, 탭 4~7만 수정 가능
   const isTabEditable = (tabId: number) => {
     if (mode === 'procurement') return false;
-    return tabId >= 3;
+    return tabId >= 4;
   };
 
   // 전체 공정 활동 데이터 (공정명 컬럼으로 통합 표시)
@@ -659,12 +940,15 @@ export default function Tier0Detail() {
   const detailProductName = company.productType ?? '';
   const siteNameOptions = (company.siteInfo ?? []).map((s) => s.siteName).filter(Boolean);
   const processNameOptions = Array.from(
-    new Set([
-      ...editableMaterials.map((r) => String(r.processName ?? '').trim()),
-      ...editableEnergyInfo.map((r) => String(r.processName ?? '').trim()),
-      ...editableProductionRows.map((r) => String(r.processName ?? '').trim()),
-      ...((company.processPerformanceInfo ?? []).map((p) => String(p.processName ?? '').trim())),
-    ].filter(Boolean)),
+    new Set(
+      [
+        ...(company.facilityInfo ?? []).map((f) => String(f.processName ?? '').trim()),
+        ...editableMaterials.map((r) => String(r.processName ?? '').trim()),
+        ...editableEnergyInfo.map((r) => String(r.processName ?? '').trim()),
+        ...editableProductionRows.map((r) => String(r.processName ?? '').trim()),
+        ...((company.processPerformanceInfo ?? []).map((p) => String(p.processName ?? '').trim())),
+      ].filter(Boolean),
+    ),
   );
   const mineralOriginOptions = Array.from(new Set((company.siteInfo ?? []).map((s) => s.country).filter(Boolean)));
   const materialNameBaseOptions = Array.from(new Set((company.materialInfo ?? []).map((m) => m.materialName).filter(Boolean)));
@@ -691,10 +975,50 @@ export default function Tier0Detail() {
     const [open, setOpen] = useState(false);
     const [q, setQ] = useState('');
     const rootRef = useRef<HTMLDivElement>(null);
+    const btnRef = useRef<HTMLButtonElement>(null);
+    const menuRef = useRef<HTMLDivElement>(null);
+    const [menuBox, setMenuBox] = useState<{
+      top: number;
+      left: number;
+      width: number;
+      maxH: number;
+    } | null>(null);
+
+    const updateMenuBox = () => {
+      if (!btnRef.current) return;
+      const r = btnRef.current.getBoundingClientRect();
+      const pad = 8;
+      const below = r.bottom + 4;
+      const maxH = Math.min(280, Math.max(120, window.innerHeight - below - pad));
+      setMenuBox({
+        top: below,
+        left: r.left,
+        width: Math.max(r.width, 220),
+        maxH,
+      });
+    };
+
+    useLayoutEffect(() => {
+      if (!open) {
+        setMenuBox(null);
+        return;
+      }
+      updateMenuBox();
+      const onScrollResize = () => updateMenuBox();
+      window.addEventListener('resize', onScrollResize);
+      window.addEventListener('scroll', onScrollResize, true);
+      return () => {
+        window.removeEventListener('resize', onScrollResize);
+        window.removeEventListener('scroll', onScrollResize, true);
+      };
+    }, [open]);
 
     useEffect(() => {
       const onDoc = (e: MouseEvent) => {
-        if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+        const t = e.target as Node;
+        if (rootRef.current?.contains(t)) return;
+        if (menuRef.current?.contains(t)) return;
+        setOpen(false);
       };
       document.addEventListener('mousedown', onDoc);
       return () => document.removeEventListener('mousedown', onDoc);
@@ -706,27 +1030,76 @@ export default function Tier0Detail() {
       return options.filter((o) => o.toLowerCase().includes(s));
     }, [options, q]);
 
+    const menu =
+      open &&
+      menuBox &&
+      typeof document !== 'undefined' &&
+      createPortal(
+        <div
+          ref={menuRef}
+          className="fixed z-[300] overflow-hidden rounded-lg border border-gray-200 bg-white shadow-lg"
+          style={{
+            top: menuBox.top,
+            left: menuBox.left,
+            width: menuBox.width,
+            maxHeight: menuBox.maxH,
+          }}
+        >
+          <input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder={placeholder}
+            className="box-border w-full border-b border-gray-100 px-2 py-1.5 text-sm outline-none"
+          />
+          <ul className="max-h-40 overflow-y-auto py-1">
+            <li>
+              <button
+                type="button"
+                className="w-full px-2 py-1.5 text-left text-sm text-gray-400 hover:bg-gray-50"
+                onClick={() => {
+                  onChange('');
+                  setOpen(false);
+                  setQ('');
+                }}
+              >
+                {emptyLabel}
+              </button>
+            </li>
+            {filtered.map((opt) => (
+              <li key={opt}>
+                <button
+                  type="button"
+                  className="w-full px-2 py-1.5 text-left text-sm text-[var(--aifix-navy)] hover:bg-violet-50"
+                  onClick={() => {
+                    onChange(opt);
+                    setOpen(false);
+                    setQ('');
+                  }}
+                >
+                  {opt}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>,
+        document.body,
+      );
+
     return (
       <div className="relative min-w-0 max-w-full" ref={rootRef}>
-        <button type="button" onClick={() => { setOpen((o) => !o); if (!open) setQ(''); }} className={SUP_DETAIL_COMBO_TRIGGER}>
+        <button
+          ref={btnRef}
+          type="button"
+          onClick={() => {
+            setOpen((o) => !o);
+            if (open) setQ('');
+          }}
+          className={SUP_DETAIL_COMBO_TRIGGER}
+        >
           <span className="min-w-0 flex-1 truncate">{value.trim() ? value : emptyLabel}</span>
           <ChevronDown className="h-4 w-4 shrink-0 opacity-60" />
         </button>
-        {open && (
-          <div className="absolute left-0 right-0 top-full z-[60] mt-1 max-h-52 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-lg">
-            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder={placeholder} className="box-border w-full border-b border-gray-100 px-2 py-1.5 text-sm outline-none" />
-            <ul className="max-h-40 overflow-y-auto py-1">
-              <li><button type="button" className="w-full px-2 py-1.5 text-left text-sm text-gray-400 hover:bg-gray-50" onClick={() => { onChange(''); setOpen(false); setQ(''); }}>{emptyLabel}</button></li>
-              {filtered.map((opt) => (
-                <li key={opt}>
-                  <button type="button" className="w-full px-2 py-1.5 text-left text-sm text-[var(--aifix-navy)] hover:bg-violet-50" onClick={() => { onChange(opt); setOpen(false); setQ(''); }}>
-                    {opt}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
+        {menu}
       </div>
     );
   }
@@ -748,16 +1121,59 @@ export default function Tier0Detail() {
     const [q, setQ] = useState('');
     const [extra, setExtra] = useState<string[]>([]);
     const rootRef = useRef<HTMLDivElement>(null);
+    const btnRef = useRef<HTMLButtonElement>(null);
+    const menuRef = useRef<HTMLDivElement>(null);
+    const [menuBox, setMenuBox] = useState<{
+      top: number;
+      left: number;
+      width: number;
+      maxH: number;
+    } | null>(null);
+
+    const updateMenuBox = () => {
+      if (!btnRef.current) return;
+      const r = btnRef.current.getBoundingClientRect();
+      const pad = 8;
+      const below = r.bottom + 4;
+      const maxH = Math.min(280, Math.max(120, window.innerHeight - below - pad));
+      setMenuBox({
+        top: below,
+        left: r.left,
+        width: Math.max(r.width, 220),
+        maxH,
+      });
+    };
+
+    useLayoutEffect(() => {
+      if (!open) {
+        setMenuBox(null);
+        return;
+      }
+      updateMenuBox();
+      const onScrollResize = () => updateMenuBox();
+      window.addEventListener('resize', onScrollResize);
+      window.addEventListener('scroll', onScrollResize, true);
+      return () => {
+        window.removeEventListener('resize', onScrollResize);
+        window.removeEventListener('scroll', onScrollResize, true);
+      };
+    }, [open]);
 
     useEffect(() => {
       const onDoc = (e: MouseEvent) => {
-        if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+        const t = e.target as Node;
+        if (rootRef.current?.contains(t)) return;
+        if (menuRef.current?.contains(t)) return;
+        setOpen(false);
       };
       document.addEventListener('mousedown', onDoc);
       return () => document.removeEventListener('mousedown', onDoc);
     }, []);
 
-    const allOptions = useMemo(() => Array.from(new Set([...baseOptions, ...extra, ...(value ? [value] : [])])), [baseOptions, extra, value]);
+    const allOptions = useMemo(
+      () => Array.from(new Set([...baseOptions, ...extra, ...(value ? [value] : [])])),
+      [baseOptions, extra, value],
+    );
     const filtered = useMemo(() => {
       const t = q.trim().toLowerCase();
       if (!t) return allOptions;
@@ -765,55 +1181,103 @@ export default function Tier0Detail() {
     }, [allOptions, q]);
     const canAdd = q.trim().length > 0 && !allOptions.some((o) => o.toLowerCase() === q.trim().toLowerCase());
 
-    return (
-      <div className="relative min-w-0 max-w-full" ref={rootRef}>
-        <button type="button" onClick={() => { setOpen((o) => !o); if (!open) setQ(''); }} className={SUP_DETAIL_COMBO_TRIGGER}>
-          <span className="min-w-0 flex-1 truncate">{value.trim() ? value : emptyLabel}</span>
-          <ChevronDown className="h-4 w-4 shrink-0 opacity-60" />
-        </button>
-        {open && (
-          <div className="absolute left-0 right-0 top-full z-[60] mt-1 max-h-52 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-lg">
-            <input
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder={placeholder}
-              className="box-border w-full border-b border-gray-100 px-2 py-1.5 text-sm outline-none"
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && canAdd) {
-                  e.preventDefault();
-                  const v = q.trim();
-                  setExtra((prev) => Array.from(new Set([...prev, v])));
-                  onChange(v);
-                  setQ('');
+    const menu =
+      open &&
+      menuBox &&
+      typeof document !== 'undefined' &&
+      createPortal(
+        <div
+          ref={menuRef}
+          className="fixed z-[300] overflow-hidden rounded-lg border border-gray-200 bg-white shadow-lg"
+          style={{
+            top: menuBox.top,
+            left: menuBox.left,
+            width: menuBox.width,
+            maxHeight: menuBox.maxH,
+          }}
+        >
+          <input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder={placeholder}
+            className="box-border w-full border-b border-gray-100 px-2 py-1.5 text-sm outline-none"
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && canAdd) {
+                e.preventDefault();
+                const v = q.trim();
+                setExtra((prev) => Array.from(new Set([...prev, v])));
+                onChange(v);
+                setQ('');
+                setOpen(false);
+              }
+            }}
+          />
+          <ul className="max-h-40 overflow-y-auto py-1">
+            <li>
+              <button
+                type="button"
+                className="w-full px-2 py-1.5 text-left text-sm text-gray-400 hover:bg-gray-50"
+                onClick={() => {
+                  onChange('');
                   setOpen(false);
-                }
-              }}
-            />
-            <ul className="max-h-40 overflow-y-auto py-1">
-              <li><button type="button" className="w-full px-2 py-1.5 text-left text-sm text-gray-400 hover:bg-gray-50" onClick={() => { onChange(''); setOpen(false); setQ(''); }}>{emptyLabel}</button></li>
-              {filtered.map((opt) => (
-                <li key={opt}>
-                  <button type="button" className="w-full px-2 py-1.5 text-left text-sm text-[var(--aifix-navy)] hover:bg-violet-50" onClick={() => { onChange(opt); setOpen(false); setQ(''); }}>
-                    {opt}
-                  </button>
-                </li>
-              ))}
-              {canAdd && (
-                <li>
-                  <button type="button" className="w-full px-2 py-1.5 text-left text-sm text-[var(--aifix-primary)] hover:bg-violet-50" onClick={() => {
+                  setQ('');
+                }}
+              >
+                {emptyLabel}
+              </button>
+            </li>
+            {filtered.map((opt) => (
+              <li key={opt}>
+                <button
+                  type="button"
+                  className="w-full px-2 py-1.5 text-left text-sm text-[var(--aifix-navy)] hover:bg-violet-50"
+                  onClick={() => {
+                    onChange(opt);
+                    setOpen(false);
+                    setQ('');
+                  }}
+                >
+                  {opt}
+                </button>
+              </li>
+            ))}
+            {canAdd && (
+              <li>
+                <button
+                  type="button"
+                  className="w-full px-2 py-1.5 text-left text-sm text-[var(--aifix-primary)] hover:bg-violet-50"
+                  onClick={() => {
                     const v = q.trim();
                     setExtra((prev) => Array.from(new Set([...prev, v])));
                     onChange(v);
                     setOpen(false);
                     setQ('');
-                  }}>
-                    "{q.trim()}" 추가
-                  </button>
-                </li>
-              )}
-            </ul>
-          </div>
-        )}
+                  }}
+                >
+                  &quot;{q.trim()}&quot; 추가
+                </button>
+              </li>
+            )}
+          </ul>
+        </div>,
+        document.body,
+      );
+
+    return (
+      <div className="relative min-w-0 max-w-full" ref={rootRef}>
+        <button
+          ref={btnRef}
+          type="button"
+          onClick={() => {
+            setOpen((o) => !o);
+            if (open) setQ('');
+          }}
+          className={SUP_DETAIL_COMBO_TRIGGER}
+        >
+          <span className="min-w-0 flex-1 truncate">{value.trim() ? value : emptyLabel}</span>
+          <ChevronDown className="h-4 w-4 shrink-0 opacity-60" />
+        </button>
+        {menu}
       </div>
     );
   }
@@ -1335,18 +1799,36 @@ export default function Tier0Detail() {
                   </tr>
                 </thead>
                 <tbody>
-                  {company.siteInfo.map((site, idx) => (
-                    <tr key={site.siteId} className="hover:bg-gray-50 transition-colors">
-                      <td className={SUP_DETAIL_TD}>{site.siteName}</td>
-                      <td className={SUP_DETAIL_TD}>{company.organizationInfo.businessRegistrationNumber}</td>
-                      <td className={SUP_DETAIL_TD}>{site.siteId}</td>
-                      <td className={SUP_DETAIL_TD}>{site.country}</td>
-                      <td className={SUP_DETAIL_TD}>{site.address}</td>
-                      <td className={SUP_DETAIL_TD}>{site.managerName}</td>
-                      <td className={SUP_DETAIL_TD}>{site.managerEmail}</td>
-                      <td className={SUP_DETAIL_TD}>{site.managerPhone}</td>
+                  {isDataViewTier0Card && !tier0RowFetched ? (
+                    <tr>
+                      <td colSpan={8} className={`${SUP_DETAIL_TD} text-center text-gray-500`}>
+                        원청 사업장 정보를 불러오는 중입니다.
+                      </td>
                     </tr>
-                  ))}
+                  ) : isDataViewTier0Card && tier0RowFetched && company.siteInfo.length === 0 ? (
+                    <tr>
+                      <td colSpan={8} className={`${SUP_DETAIL_TD} text-center text-gray-500`}>
+                        등록된 원청 사업장이 없습니다. 시드·마스터(opr_workplaces, 본법인×제품)를 확인하세요.
+                      </td>
+                    </tr>
+                  ) : (
+                    company.siteInfo.map((site) => (
+                      <tr key={site.siteId} className="hover:bg-gray-50 transition-colors">
+                        <td className={SUP_DETAIL_TD}>{site.siteName}</td>
+                        <td className={SUP_DETAIL_TD}>
+                          {safeValue(
+                            site.businessRegNo ?? company.organizationInfo.businessRegistrationNumber,
+                          )}
+                        </td>
+                        <td className={SUP_DETAIL_TD}>{safeValue(site.workplaceNo ?? site.siteId)}</td>
+                        <td className={SUP_DETAIL_TD}>{site.country}</td>
+                        <td className={SUP_DETAIL_TD}>{site.address}</td>
+                        <td className={SUP_DETAIL_TD}>{site.managerName}</td>
+                        <td className={SUP_DETAIL_TD}>{site.managerEmail}</td>
+                        <td className={SUP_DETAIL_TD}>{site.managerPhone}</td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>
@@ -1557,7 +2039,7 @@ export default function Tier0Detail() {
           </div>
         );
       
-      case 3: // 설비 정보
+      case 3: // 설비 정보 — 인터페이스 연동(ESG에서 사업장·담당자와 동일 잠금)
         return (
           <div>
             <div className="flex items-center justify-between mb-4">
@@ -1578,15 +2060,35 @@ export default function Tier0Detail() {
                   </tr>
                 </thead>
                 <tbody>
-                  {company.facilityInfo.map((facility, idx) => (
-                    <tr key={facility.facilityNumber} className="hover:bg-gray-50 transition-colors">
-                      <td className={SUP_DETAIL_TD}>{company.siteInfo?.[0]?.siteName ?? '-'}</td>
-                      <td className={SUP_DETAIL_TD}>{facility.energyType ?? '-'}</td>
-                      <td className={SUP_DETAIL_TD}>{facility.processName}</td>
-                      <td className={SUP_DETAIL_TD}>{facility.facilityName}</td>
-                      <td className={SUP_DETAIL_TD}>{facility.facilityNumber}</td>
+                  {isDataViewTier0Card && !tier0RowFetched ? (
+                    <tr>
+                      <td colSpan={5} className={`${SUP_DETAIL_TD} text-center text-gray-500`}>
+                        설비 정보를 불러오는 중입니다.
+                      </td>
                     </tr>
-                  ))}
+                  ) : isDataViewTier0Card && tier0RowFetched && company.facilityInfo.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className={`${SUP_DETAIL_TD} text-center text-gray-500`}>
+                        등록된 설비가 없습니다. run_seed_opr_equipments_product_a_dev.py 로
+                        opr_equipments 를 넣었는지 확인하세요.
+                      </td>
+                    </tr>
+                  ) : (
+                    company.facilityInfo.map((facility, idx) => (
+                      <tr
+                        key={`${facility.facilityNumber}-${idx}`}
+                        className="hover:bg-gray-50 transition-colors"
+                      >
+                        <td className={SUP_DETAIL_TD}>
+                          {safeValue(facility.siteName ?? company.siteInfo?.[0]?.siteName)}
+                        </td>
+                        <td className={SUP_DETAIL_TD}>{facility.energyType ?? '-'}</td>
+                        <td className={SUP_DETAIL_TD}>{facility.processName}</td>
+                        <td className={SUP_DETAIL_TD}>{facility.facilityName}</td>
+                        <td className={SUP_DETAIL_TD}>{facility.facilityNumber}</td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>
@@ -1998,13 +2500,17 @@ export default function Tier0Detail() {
           </div>
         );
       
-      case 2: // 담당자 정보 (구매/ESG)
+      case 2: // 담당자 정보 — 데이터뷰 Tier0: 로그인 본인 + 동일 법인 구매팀(IAM)
         return (
           <div>
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2 text-sm text-gray-600">
                 <Lock className="w-4 h-4" />
-                <span>🔗 Source : ERP / MES Interface | Data Sync : 자동 연동</span>
+                <span>
+                  {isDataViewTier0Card
+                    ? '로그인 계정 및 구매팀(opr_profiles) — 동일 원청 법인'
+                    : '🔗 Source : ERP / MES Interface | Data Sync : 자동 연동'}
+                </span>
               </div>
             </div>
             <div className="overflow-x-auto">
@@ -2020,16 +2526,33 @@ export default function Tier0Detail() {
                   </tr>
                 </thead>
                 <tbody>
-                  {company.contactInfo.map((contact, idx) => (
-                    <tr key={contact.employeeId} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
-                      <td className="px-4 py-3 text-sm border">{contact.employeeId}</td>
-                      <td className="px-4 py-3 text-sm border">{contact.department}</td>
-                      <td className="px-4 py-3 text-sm border">{contact.position}</td>
-                      <td className="px-4 py-3 text-sm border">{contact.name}</td>
-                      <td className="px-4 py-3 text-sm border">{contact.email}</td>
-                      <td className="px-4 py-3 text-sm border">{contact.phone}</td>
+                  {isDataViewTier0Card && oprDataViewContacts === null ? (
+                    <tr>
+                      <td colSpan={6} className="px-4 py-8 text-center text-sm text-gray-500 border">
+                        담당자 정보를 불러오는 중입니다.
+                      </td>
                     </tr>
-                  ))}
+                  ) : isDataViewTier0Card && company.contactInfo.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="px-4 py-8 text-center text-sm text-gray-500 border">
+                        표시할 담당자가 없습니다. 원청 프로필(opr_profiles)을 확인하세요.
+                      </td>
+                    </tr>
+                  ) : (
+                    company.contactInfo.map((contact, idx) => (
+                      <tr
+                        key={`${contact.employeeId}-${idx}`}
+                        className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}
+                      >
+                        <td className="px-4 py-3 text-sm border">{contact.employeeId}</td>
+                        <td className="px-4 py-3 text-sm border">{contact.department}</td>
+                        <td className="px-4 py-3 text-sm border">{contact.position}</td>
+                        <td className="px-4 py-3 text-sm border">{contact.name}</td>
+                        <td className="px-4 py-3 text-sm border">{contact.email}</td>
+                        <td className="px-4 py-3 text-sm border">{contact.phone}</td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>

@@ -10,6 +10,20 @@ import PcfDetailModal from './PcfDetailModal';
 import MonthRangePicker from './MonthRangePicker';
 import SupplyChainVersionModal from './SupplyChainVersionModal';
 import { useMode } from '../context/ModeContext';
+import { apiFetch, restoreOprSessionFromCookie } from '@/lib/api/client';
+import { getOprAccessToken } from '@/lib/api/sessionAccessToken';
+import type { OprMonthlyTierRow, OprQueryRequest } from '@/lib/api/dataMgmtOpr';
+import {
+  downloadOprExport,
+  getOprBomPeriod,
+  getOprMonthlyOverview,
+  postOprQuery,
+} from '@/lib/api/dataMgmtOpr';
+import { saveSupplierDetailSnapshot } from '@/lib/dataViewSupplierSnapshot';
+
+/** 월별 공급망 트리 그리드. 회사명 열에 0.5fr만 주면 min-w-0과 맞물려 폭이 0으로 붕괴해 텍스트가 안 보일 수 있음 */
+const DATA_VIEW_MONTH_TREE_GRID_COLS =
+  'minmax(150px, 180px) minmax(70px, 90px) minmax(160px, 1.2fr) minmax(0, 1fr) minmax(100px, 130px) minmax(90px, 120px) minmax(115px, 150px) minmax(0, 1fr) minmax(115px, 150px) minmax(0, 1fr) minmax(90px, 110px) minmax(0, 1fr)';
 
 // Unified data structure - contains both procurement and PCF data
 interface DataNode {
@@ -48,6 +62,216 @@ interface DetailProductCard {
   product: string;
   detailProduct: string;
   bomCode: string;
+  custBranchId: number;
+  productVariantId: number;
+  projectId: number;
+}
+
+/** 공급망 캐스케이드 1행 (고객→지사→프로젝트→제품→세부제품) */
+type ScaffoldVariantRow = {
+  customerId: number;
+  customerName: string;
+  branchId: number;
+  branchName: string;
+  projectId: number;
+  projectStartIso: string;
+  projectEndIso: string;
+  productId: number;
+  productName: string;
+  variantId: number;
+  variantName: string;
+  variantCode: string | null;
+};
+
+function parseIsoToYearMonth(iso: string): { y: number; m: number } {
+  const d = new Date(iso);
+  return { y: d.getFullYear(), m: d.getMonth() + 1 };
+}
+
+function enumerateMonthsBetweenYm(startYm: string, endYm: string): string[] {
+  if (!startYm || !endYm || startYm > endYm) return [];
+  const [sy, sm] = startYm.split('-').map(Number);
+  const [ey, em] = endYm.split('-').map(Number);
+  const out: string[] = [];
+  let y = sy;
+  let m = sm;
+  while (y < ey || (y === ey && m <= em)) {
+    out.push(`${y}-${String(m).padStart(2, '0')}`);
+    m++;
+    if (m > 12) {
+      m = 1;
+      y++;
+    }
+  }
+  return out;
+}
+
+function monthsFromProjectIso(startIso: string, endIso: string): string[] {
+  const s = parseIsoToYearMonth(startIso);
+  const e = parseIsoToYearMonth(endIso);
+  const startYm = `${s.y}-${String(s.m).padStart(2, '0')}`;
+  const endYm = `${e.y}-${String(e.m).padStart(2, '0')}`;
+  return enumerateMonthsBetweenYm(startYm, endYm);
+}
+
+function intersectMonthLists(a: string[], b: string[]): string[] {
+  const setA = new Set(a);
+  return b.filter((x) => setA.has(x));
+}
+
+function lastDayOfMonth(y: number, mo: number): number {
+  return new Date(y, mo, 0).getDate();
+}
+
+function periodEndDate(ym: string): string {
+  const [y, m] = ym.split('-').map(Number);
+  const d = lastDayOfMonth(y, m);
+  return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
+function periodStartDate(ym: string): string {
+  const [y, m] = ym.split('-').map(Number);
+  return `${y}-${String(m).padStart(2, '0')}-01`;
+}
+
+/** 고객사 전체 조회 시: 각 지사 프로젝트 기간 ∩ 사용자 기간의 월 합집합(정렬) */
+function unionIntersectedMonthsForCustomerBranches(
+  customerId: number,
+  generalStart: string,
+  generalEnd: string,
+  scaffold: ScaffoldVariantRow[],
+): string[] {
+  const userMonths = enumerateMonthsBetweenYm(generalStart, generalEnd);
+  const branchIds = [
+    ...new Set(
+      scaffold.filter((r) => r.customerId === customerId).map((r) => r.branchId),
+    ),
+  ];
+  const acc = new Set<string>();
+  for (const bid of branchIds) {
+    const row = scaffold.find((r) => r.branchId === bid && r.customerId === customerId);
+    if (!row) continue;
+    const pm = monthsFromProjectIso(row.projectStartIso, row.projectEndIso);
+    intersectMonthLists(pm, userMonths).forEach((m) => acc.add(m));
+  }
+  return Array.from(acc).sort();
+}
+
+function parsePcfKg(s: string | null | undefined): number | null {
+  if (s == null || String(s).trim() === '') return null;
+  const n = parseFloat(String(s).replace(/,/g, ''));
+  return Number.isFinite(n) ? n : null;
+}
+
+/** 응답이 snake_case 또는 camelCase일 때 월별 overview 문자열 필드 정규화 */
+function pickMonthlyRowString(
+  row: OprMonthlyTierRow,
+  snake: keyof OprMonthlyTierRow,
+  camel: string,
+): string | undefined {
+  const rec = row as unknown as Record<string, unknown>;
+  const raw = row[snake] ?? rec[camel];
+  if (raw == null) return undefined;
+  const s = String(raw).trim();
+  return s === '' ? undefined : s;
+}
+
+function rowToDataNode(row: OprMonthlyTierRow, id: string): DataNode {
+  const pcfRaw = pickMonthlyRowString(row, 'pcf_result_kg_co2e', 'pcfResultKgCo2e') ?? row.pcf_result_kg_co2e;
+  const pcf = parsePcfKg(pcfRaw);
+  const tierLabel =
+    pickMonthlyRowString(row, 'tier_label', 'tierLabel')?.trim() || `Tier ${row.tier}`;
+  const statusCode = pickMonthlyRowString(row, 'status_code', 'statusCode') ?? row.status_code;
+  let dataSubmissionStatus: DataNode['dataSubmissionStatus'] = 'submitted';
+  if (statusCode === 'pending') dataSubmissionStatus = 'not-submitted';
+
+  const companyTypeRaw =
+    pickMonthlyRowString(row, 'company_type', 'companyType') ?? row.company_type ?? '';
+  const companyType: DataNode['companyType'] =
+    companyTypeRaw === 'Operator' || row.tier === 0 ? 'Operator' : 'Supplier';
+
+  let companyName = pickMonthlyRowString(row, 'company_name', 'companyName');
+  if ((companyName == null || companyName === '') && row.tier === 0) {
+    companyName = '우리회사';
+  }
+  if (companyName == null || companyName === '') {
+    companyName = '-';
+  }
+  const productType = pickMonthlyRowString(row, 'product_type', 'productType') ?? '-';
+
+  return {
+    id,
+    tier: tierLabel,
+    companyName,
+    companyNameEn: '',
+    country: pickMonthlyRowString(row, 'country', 'country') ?? row.country ?? '',
+    companyType,
+    deliveryVolume: 0,
+    rawMaterialInput: 0,
+    productType,
+    emissionSource: '',
+    pcfResult: pcf,
+    emissionIntensity: null,
+    dataSubmissionStatus,
+    verificationStatus: statusCode === 'ok' ? 'verified' : 'not-verified',
+    riskLevel: statusCode === 'warning_lower_tier' ? 'medium' : 'low',
+    dataInputStatus: 'completed',
+    pcfCalculationStatus: pcf != null ? 'verified' : 'pending',
+    submissionStatus: statusCode === 'ok' ? 'verified' : 'pending',
+    lastUpdate: '',
+  };
+}
+
+/** 백엔드 월별 평면 행 → 티어 부모 스택으로 트리 구성 (API 행 순서 전제) */
+function monthlyRowsToTree(rows: OprMonthlyTierRow[], cardId: string, month: string): DataNode {
+  const prefix = `${cardId}-${month}`;
+  if (!rows.length) {
+    return {
+      id: `${prefix}-empty-tier0`,
+      tier: 'Tier 0',
+      companyName: '데이터 없음',
+      companyNameEn: '',
+      country: '',
+      companyType: 'Operator',
+      deliveryVolume: 0,
+      rawMaterialInput: 0,
+      productType: '-',
+      emissionSource: '',
+      pcfResult: null,
+      emissionIntensity: null,
+      dataSubmissionStatus: 'not-submitted',
+      verificationStatus: 'not-verified',
+      riskLevel: 'low',
+      dataInputStatus: 'pending',
+      pcfCalculationStatus: 'pending',
+      submissionStatus: 'pending',
+      lastUpdate: '',
+    };
+  }
+
+  const i0 = rows.findIndex((r) => r.tier === 0);
+  const rootSource = i0 >= 0 ? rows[i0]! : rows[0]!;
+  const root = rowToDataNode(rootSource, `${prefix}-tier0`);
+  const rest = i0 >= 0 ? rows.filter((_, idx) => idx !== i0) : rows.slice(1);
+
+  const lastAtTier = new Map<number, DataNode>();
+  lastAtTier.set(rootSource.tier, root);
+
+  let seq = 0;
+  for (const r of rest) {
+    // URL·sessionStorage 키에 `:` 포함 시 라우터/인코딩과 어긋날 수 있어 제거
+    const safeKey = (r.detail_key ?? `seq-${seq++}`).replace(/[^\w-]/g, '_');
+    const node = rowToDataNode(r, `${prefix}-n-${safeKey}`);
+    const pt = r.tier - 1;
+    const parent = lastAtTier.get(pt) ?? root;
+    if (!parent.children) parent.children = [];
+    parent.children.push(node);
+    lastAtTier.set(r.tier, node);
+    for (const k of [...lastAtTier.keys()]) {
+      if (k > r.tier) lastAtTier.delete(k);
+    }
+  }
+  return root;
 }
 
 // Supply Chain Group & Version for matching
@@ -92,71 +316,6 @@ const mockSupplyChainVersions: SupplyChainVersion[] = [
 const DATA_VIEW_FILTER_STORAGE_KEY = 'aifix_data_view_filters_v1';
 const DATA_VIEW_BACK_FLAG_KEY = 'aifix_data_view_from_back_v1';
 
-// 협력사 포털 공급망 구조와 동일 (우리회사 → 동우전자부품/한국소재산업/테크놀로지파트너스 → 하위 2차/3차)
-const getSampleSupplyChainTree = (cardId: string, month: string): DataNode => {
-  const prefix = `${cardId}-${month}`;
-  const base = (opts: Partial<DataNode> & { tier: string; companyName: string; companyNameEn: string; country?: string; productType: string }) =>
-    ({ companyType: 'Supplier' as const, deliveryVolume: 10000, pcfResult: 0, emissionIntensity: 0.5, dataSubmissionStatus: 'submitted' as const, verificationStatus: 'verified' as const, riskLevel: 'low' as const, dataInputStatus: 'completed' as const, pcfCalculationStatus: 'verified' as const, submissionStatus: 'verified' as const, lastUpdate: '2026-03-01', emissionSource: 'Internal DB', rawMaterialInput: 10000, ...opts, country: opts.country ?? 'South Korea' });
-
-  return {
-    id: `${prefix}-tier0`,
-    tier: 'Tier 0',
-    companyName: '우리회사',
-    companyNameEn: 'Our Company',
-    country: 'South Korea',
-    companyType: 'Operator',
-    deliveryVolume: 50000,
-    rawMaterialInput: 30000,
-    productType: '배터리 모듈',
-    emissionSource: 'Internal DB',
-    pcfResult: 32420.3,
-    emissionIntensity: 0.6484,
-    dataSubmissionStatus: 'submitted',
-    verificationStatus: 'verified',
-    riskLevel: 'low',
-    dataInputStatus: 'completed',
-    pcfCalculationStatus: 'verified',
-    submissionStatus: 'verified',
-    lastUpdate: '2026-03-01',
-    children: [
-      {
-        ...base({ tier: 'Tier 1', companyName: '동우전자부품', companyNameEn: 'Dongwoo Electronic Components', productType: '전자부품', deliveryVolume: 25000, pcfResult: 18200, emissionIntensity: 0.73 }),
-        id: `${prefix}-tier1-1`,
-        children: [
-          {
-            ...base({ tier: 'Tier 2', companyName: '세진케미칼', companyNameEn: 'Sejin Chemical', productType: '케미칼 소재', deliveryVolume: 15000, pcfResult: 8500, emissionIntensity: 0.57 }),
-            id: `${prefix}-tier2-1`,
-            verificationStatus: 'not-verified',
-            pcfCalculationStatus: 'submitted',
-            submissionStatus: 'submitted',
-            children: [
-              { ...base({ tier: 'Tier 3', companyName: '디오케미칼', companyNameEn: 'Dio Chemical', productType: '원료', country: 'South Korea', deliveryVolume: 8000, pcfResult: null, emissionIntensity: null, dataSubmissionStatus: 'not-submitted', pcfCalculationStatus: 'pending', submissionStatus: 'pending' }), id: `${prefix}-tier3-1`, children: undefined },
-              { ...base({ tier: 'Tier 3', companyName: '솔브런트', companyNameEn: 'Solvrent', productType: '용매', country: 'South Korea', deliveryVolume: 7000, pcfResult: 3200, emissionIntensity: 0.46 }), id: `${prefix}-tier3-2`, children: undefined },
-            ],
-          },
-          { ...base({ tier: 'Tier 2', companyName: '그린에너지솔루션', companyNameEn: 'Green Energy Solution', productType: '에너지 부품', deliveryVolume: 10000, pcfResult: 4200, emissionIntensity: 0.42 }), id: `${prefix}-tier2-2`, children: undefined },
-        ],
-      },
-      {
-        ...base({ tier: 'Tier 1', companyName: '한국소재산업', companyNameEn: 'Korea Material Industry', productType: '소재', deliveryVolume: 18000, pcfResult: 9500, emissionIntensity: 0.53 }),
-        id: `${prefix}-tier1-2`,
-        verificationStatus: 'not-verified',
-        children: [
-          { ...base({ tier: 'Tier 2', companyName: '글로벌메탈', companyNameEn: 'Global Metal', productType: '금속 소재', country: 'Germany', deliveryVolume: 8000, pcfResult: 4100 }), id: `${prefix}-tier2-3`, children: undefined },
-          { ...base({ tier: 'Tier 2', companyName: '에코플라스틱', companyNameEn: 'Eco Plastic', productType: '플라스틱', deliveryVolume: 6000, pcfResult: 2800 }), id: `${prefix}-tier2-4`, children: undefined },
-          { ...base({ tier: 'Tier 2', companyName: '바이오소재연구소', companyNameEn: 'Bio Material Research Institute', productType: '바이오 소재', deliveryVolume: 4000, pcfResult: null, emissionIntensity: null, dataSubmissionStatus: 'not-submitted', pcfCalculationStatus: 'pending', submissionStatus: 'pending' }), id: `${prefix}-tier2-5`, children: undefined },
-        ],
-      },
-      {
-        ...base({ tier: 'Tier 1', companyName: '테크놀로지파트너스', companyNameEn: 'Technology Partners', productType: '기술 부품', deliveryVolume: 7000, pcfResult: 3120, emissionIntensity: 0.45 }),
-        id: `${prefix}-tier1-3`,
-        children: undefined,
-      },
-    ],
-  };
-};
-
-
 export default function DataView() {
   const { mode } = useMode();
   const router = useRouter();
@@ -196,37 +355,133 @@ export default function DataView() {
 
   const defaultMonthRange = getDefaultMonthRange();
 
-  type FilterRow = {
-    customer: string;
-    branch: string;
-    site: string;
-    factory: string;
-    product: string;
-    detailProduct: string;
-    bomCode: string;
-    projectPeriodLabel: string;
-    projectPeriodStart: string;
-    projectPeriodEnd: string;
-  };
+  const [scaffoldVariants, setScaffoldVariants] = useState<ScaffoldVariantRow[]>([]);
+  const [scaffoldLoading, setScaffoldLoading] = useState(false);
+  const [bomPeriodBrief, setBomPeriodBrief] = useState<{
+    bom_code: string | null;
+    project_start: string;
+    project_end: string;
+  } | null>(null);
 
-  // 고객사-지사-제품-세부제품 체인 (프로젝트/공급망 탭과 동일, 고객사별 고유 제품명)
-  const filterRows: FilterRow[] = [
-    // BMW / BMW Munich
-    { customer: 'BMW', branch: 'BMW Munich', site: '유럽 사업장', factory: 'Munich 1공장', product: 'BMW iX5 ESS 팩', detailProduct: 'BMW-X5-001 | ESS 기본형', bomCode: 'BOM_BMW_X5_001', projectPeriodLabel: '2026.01 ~ 2026.12', projectPeriodStart: '2026-01', projectPeriodEnd: '2026-12' },
-    // Audi / Audi Germany
-    { customer: 'Audi', branch: 'Audi Germany', site: '유럽 사업장', factory: 'Ingolstadt 1공장', product: 'Audi 배터리 모듈 A', detailProduct: 'AU-A-001 | 기본형', bomCode: 'BOM_AUDI_A_001', projectPeriodLabel: '2026.01 ~ 2026.12', projectPeriodStart: '2026-01', projectPeriodEnd: '2026-12' },
-    { customer: 'Audi', branch: 'Audi Germany', site: '유럽 사업장', factory: 'Ingolstadt 1공장', product: 'Audi 배터리 모듈 A', detailProduct: 'AU-A-002 | LFP 적용', bomCode: 'BOM_AUDI_A_002', projectPeriodLabel: '2026.01 ~ 2026.12', projectPeriodStart: '2026-01', projectPeriodEnd: '2026-12' },
-    { customer: 'Audi', branch: 'Audi Germany', site: '유럽 사업장', factory: 'Ingolstadt 1공장', product: 'Audi 배터리 모듈 A', detailProduct: 'AU-A-003 | 고에너지밀도', bomCode: 'BOM_AUDI_A_003', projectPeriodLabel: '2026.01 ~ 2026.12', projectPeriodStart: '2026-01', projectPeriodEnd: '2026-12' },
-    { customer: 'Audi', branch: 'Audi Germany', site: '유럽 사업장', factory: 'Ingolstadt 1공장', product: 'Audi 배터리 모듈 B', detailProduct: 'AU-B-001 | NCM 적용', bomCode: 'BOM_AUDI_B_001', projectPeriodLabel: '2026.01 ~ 2026.12', projectPeriodStart: '2026-01', projectPeriodEnd: '2026-12' },
-    { customer: 'Audi', branch: 'Audi Germany', site: '유럽 사업장', factory: 'Ingolstadt 1공장', product: 'Audi 배터리 모듈 B', detailProduct: 'AU-B-002 | 고출력형', bomCode: 'BOM_AUDI_B_002', projectPeriodLabel: '2026.01 ~ 2026.12', projectPeriodStart: '2026-01', projectPeriodEnd: '2026-12' },
-    // Mercedes-Benz / Mercedes Germany
-    { customer: 'Mercedes-Benz', branch: 'Mercedes Germany', site: '유럽 사업장', factory: 'Berlin 2공장', product: 'Mercedes EQ 배터리 모듈', detailProduct: 'MB-EQ-001 | 기본형', bomCode: 'BOM_MB_EQ_001', projectPeriodLabel: '2026.04 ~ 2027.03', projectPeriodStart: '2026-04', projectPeriodEnd: '2027-03' },
-    { customer: 'Mercedes-Benz', branch: 'Mercedes Germany', site: '유럽 사업장', factory: 'Berlin 2공장', product: 'Mercedes EQ 배터리 모듈', detailProduct: 'MB-EQ-002 | LFP 적용', bomCode: 'BOM_MB_EQ_002', projectPeriodLabel: '2026.04 ~ 2027.03', projectPeriodStart: '2026-04', projectPeriodEnd: '2027-03' },
-    { customer: 'Mercedes-Benz', branch: 'Mercedes Germany', site: '유럽 사업장', factory: 'Berlin 2공장', product: 'Mercedes EQ 배터리 모듈', detailProduct: 'MB-EQ-003 | 고에너지밀도', bomCode: 'BOM_MB_EQ_003', projectPeriodLabel: '2026.04 ~ 2027.03', projectPeriodStart: '2026-04', projectPeriodEnd: '2027-03' },
-    { customer: 'Mercedes-Benz', branch: 'Mercedes Germany', site: '유럽 사업장', factory: 'Berlin 2공장', product: 'Mercedes 전고체 셀', detailProduct: 'MB-SS-001 | NCM 적용', bomCode: 'BOM_MB_SS_001', projectPeriodLabel: '2026.04 ~ 2027.03', projectPeriodStart: '2026-04', projectPeriodEnd: '2027-03' },
-    { customer: 'Mercedes-Benz', branch: 'Mercedes Germany', site: '유럽 사업장', factory: 'Berlin 2공장', product: 'Mercedes 전고체 셀', detailProduct: 'MB-SS-002 | 고출력형', bomCode: 'BOM_MB_SS_002', projectPeriodLabel: '2026.04 ~ 2027.03', projectPeriodStart: '2026-04', projectPeriodEnd: '2027-03' },
-    { customer: 'Mercedes-Benz', branch: 'Mercedes Germany', site: '유럽 사업장', factory: 'Berlin 2공장', product: 'Mercedes ESS 팩', detailProduct: 'MB-ESS-001 | ESS 기본형', bomCode: 'BOM_MB_ESS_001', projectPeriodLabel: '2026.04 ~ 2027.03', projectPeriodStart: '2026-04', projectPeriodEnd: '2027-03' },
-  ];
+  const [queriedCards, setQueriedCards] = useState<DetailProductCard[]>([]);
+  const [queriedPeriodMonths, setQueriedPeriodMonths] = useState<string[]>([]);
+  const [queriedSummaryText, setQueriedSummaryText] = useState('');
+  const lastQueryBodyRef = useRef<OprQueryRequest | null>(null);
+  const [queryLoading, setQueryLoading] = useState(false);
+
+  const [overviewByKey, setOverviewByKey] = useState<Record<string, DataNode>>({});
+  const [overviewLoadingKey, setOverviewLoadingKey] = useState<string | null>(null);
+  const [overviewErrorKey, setOverviewErrorKey] = useState<string | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    let loadAttempted = false;
+
+    const loadScaffold = async () => {
+      if (loadAttempted) return;
+      loadAttempted = true;
+      setScaffoldLoading(true);
+      try {
+        // OprSessionRestore 와 경쟁 시 첫 요청이 토큰 없이 나가 401 나는 것 방지
+        if (typeof window !== 'undefined' && !getOprAccessToken()) {
+          await restoreOprSessionFromCookie();
+        }
+        const customers = await apiFetch<{ id: number; name: string }[]>(
+          '/api/supply-chain/project-supply-chain/customers',
+        );
+        const allBranchesNested = await Promise.all(
+          customers.map(async (customer) => {
+            try {
+              const branches = await apiFetch<{ id: number; name?: string }[]>(
+                `/api/supply-chain/project-supply-chain/customers/${customer.id}/branches`,
+              );
+              return branches.map((b) => ({ customer, branch: b }));
+            } catch {
+              return [];
+            }
+          }),
+        );
+        const allBranches = allBranchesNested.flat();
+
+        const allProjectsResults = await Promise.all(
+          allBranches.map(async ({ customer, branch }) => {
+            try {
+              const project = await apiFetch<{
+                id: number;
+                start_date: string;
+                end_date: string;
+              }>(`/api/supply-chain/project-supply-chain/branches/${branch.id}/project`);
+              return { customer, branch, project };
+            } catch {
+              return null;
+            }
+          }),
+        );
+        const allProjects = allProjectsResults.filter(
+          (x): x is NonNullable<typeof x> => x !== null,
+        );
+
+        const allProductsNested = await Promise.all(
+          allProjects.map(async ({ customer, branch, project }) => {
+            try {
+              const products = await apiFetch<{ id: number; name: string }[]>(
+                `/api/supply-chain/project-supply-chain/projects/${project.id}/products`,
+              );
+              return products.map((prod) => ({ customer, branch, project, product: prod }));
+            } catch {
+              return [];
+            }
+          }),
+        );
+        const allProductsFlat = allProductsNested.flat();
+
+        const allVariantsNested = await Promise.all(
+          allProductsFlat.map(async (item) => {
+            try {
+              const variants = await apiFetch<
+                { id: number; name: string; code?: string | null }[]
+              >(
+                `/api/supply-chain/project-supply-chain/projects/${item.project.id}/products/${item.product.id}/product-variants`,
+              );
+              return variants.map((v) => ({ ...item, variant: v }));
+            } catch {
+              return [];
+            }
+          }),
+        );
+        const allVariants = allVariantsNested.flat();
+
+        const rows: ScaffoldVariantRow[] = allVariants.map((item) => ({
+          customerId: item.customer.id,
+          customerName: item.customer.name || `고객 #${item.customer.id}`,
+          branchId: item.branch.id,
+          branchName: item.branch.name ?? `지사 #${item.branch.id}`,
+          projectId: item.project.id,
+          projectStartIso: item.project.start_date,
+          projectEndIso: item.project.end_date,
+          productId: item.product.id,
+          productName: item.product.name,
+          variantId: item.variant.id,
+          variantName: item.variant.name,
+          variantCode: item.variant.code ?? null,
+        }));
+
+        if (mounted) setScaffoldVariants(rows);
+      } catch (e) {
+        console.error('DataView scaffold load failed', e);
+        if (mounted) {
+          toast.error('고객사·제품 목록을 불러오지 못했습니다. 공급망 API를 확인해 주세요.');
+        }
+      } finally {
+        if (mounted) setScaffoldLoading(false);
+      }
+    };
+
+    void loadScaffold();
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   // Filter states (공통)
   const [selectedCustomer, setSelectedCustomer] = useState('');
@@ -243,63 +498,115 @@ export default function DataView() {
   const [generalPeriodError, setGeneralPeriodError] = useState('');
   const [selectedProcess, setSelectedProcess] = useState('ALL');
 
-  const customerOptions = useMemo(
-    () => Array.from(new Set(filterRows.map((row) => row.customer))).sort((a, b) => a.localeCompare(b)),
-    [filterRows]
-  );
-  const branchOptions = useMemo(
-    () => Array.from(new Set(filterRows.filter((row) => row.customer === selectedCustomer).map((row) => row.branch))).sort((a, b) => a.localeCompare(b)),
-    [filterRows, selectedCustomer]
-  );
-  const productOptions = useMemo(
-    () =>
-      Array.from(
-        new Set(
-          filterRows
-            .filter((row) => row.customer === selectedCustomer && row.branch === selectedBranch)
-            .map((row) => row.product)
-        )
-      ).sort((a, b) => a.localeCompare(b)),
-    [filterRows, selectedCustomer, selectedBranch]
-  );
-  const detailProductOptions = useMemo(
-    () =>
-      filterRows
-        .filter(
-          (row) =>
-            row.customer === selectedCustomer &&
-            row.branch === selectedBranch &&
-            row.product === selectedProduct
-        )
-        .sort((a, b) => a.detailProduct.localeCompare(b.detailProduct)),
-    [filterRows, selectedCustomer, selectedBranch, selectedProduct]
-  );
-  const selectedDetailMeta = useMemo(
-    () => detailProductOptions.find((row) => row.detailProduct === selectedDetailProduct),
-    [detailProductOptions, selectedDetailProduct]
-  );
-
-  /** 세부제품 행의 계약기간(projectPeriodStart~End)에 포함된 월만 월 선택 UI에서 활성화 */
-  const contractMonths = useMemo((): string[] | undefined => {
-    if (!selectedDetailMeta) return undefined;
-    const start = selectedDetailMeta.projectPeriodStart;
-    const end = selectedDetailMeta.projectPeriodEnd;
-    if (!start || !end || start > end) return [];
-    const [sy, sm] = start.split('-').map(Number);
-    const [ey, em] = end.split('-').map(Number);
-    const months: string[] = [];
-    let y = sy;
-    let m = sm;
-    while (y < ey || (y === ey && m <= em)) {
-      months.push(`${y}-${String(m).padStart(2, '0')}`);
-      m++;
-      if (m > 12) {
-        m = 1;
-        y++;
-      }
+  const customerOptions = useMemo(() => {
+    const byId = new Map<number, string>();
+    for (const r of scaffoldVariants) {
+      if (!byId.has(r.customerId)) byId.set(r.customerId, r.customerName);
     }
-    return months;
-  }, [selectedDetailMeta]);
+    return [...byId.entries()]
+      .sort((a, b) => a[1].localeCompare(b[1]))
+      .map(([id, name]) => ({ id, name }));
+  }, [scaffoldVariants]);
+
+  const branchOptions = useMemo(() => {
+    if (!selectedCustomer) return [];
+    const cid = Number(selectedCustomer);
+    if (!Number.isFinite(cid)) return [];
+    const byId = new Map<number, string>();
+    for (const r of scaffoldVariants) {
+      if (r.customerId === cid && !byId.has(r.branchId)) byId.set(r.branchId, r.branchName);
+    }
+    return [...byId.entries()]
+      .sort((a, b) => a[1].localeCompare(b[1]))
+      .map(([id, name]) => ({ id, name }));
+  }, [scaffoldVariants, selectedCustomer]);
+
+  const productOptions = useMemo(() => {
+    if (!selectedCustomer) return [];
+    const cid = Number(selectedCustomer);
+    if (!Number.isFinite(cid)) return [];
+    const byId = new Map<number, string>();
+    for (const r of scaffoldVariants) {
+      if (r.customerId !== cid) continue;
+      if (selectedBranch) {
+        const bid = Number(selectedBranch);
+        if (!Number.isFinite(bid) || r.branchId !== bid) continue;
+      }
+      if (!byId.has(r.productId)) byId.set(r.productId, r.productName);
+    }
+    return [...byId.entries()]
+      .sort((a, b) => a[1].localeCompare(b[1]))
+      .map(([id, name]) => ({ id, name }));
+  }, [scaffoldVariants, selectedCustomer, selectedBranch]);
+
+  const detailProductOptions = useMemo(() => {
+    if (!selectedCustomer || !selectedProduct) return [];
+    const cid = Number(selectedCustomer);
+    const pid = Number(selectedProduct);
+    if (!Number.isFinite(cid) || !Number.isFinite(pid)) return [];
+    const bid = selectedBranch ? Number(selectedBranch) : NaN;
+    const hasBranch = selectedBranch && Number.isFinite(bid);
+    return scaffoldVariants
+      .filter((r) => {
+        if (r.customerId !== cid || r.productId !== pid) return false;
+        if (hasBranch) return r.branchId === bid;
+        return true;
+      })
+      .sort((a, b) => a.variantName.localeCompare(b.variantName));
+  }, [scaffoldVariants, selectedCustomer, selectedBranch, selectedProduct]);
+
+  const selectedDetailMeta = useMemo(() => {
+    if (!selectedDetailProduct) return null;
+    const vid = Number(selectedDetailProduct);
+    if (!Number.isFinite(vid)) return null;
+    const fromList = detailProductOptions.find((row) => row.variantId === vid);
+    if (fromList) return fromList;
+    return scaffoldVariants.find((r) => r.variantId === vid) ?? null;
+  }, [detailProductOptions, selectedDetailProduct, scaffoldVariants]);
+
+  const projectPeriodLabelDisplay = useMemo(() => {
+    const startIso = bomPeriodBrief?.project_start ?? selectedDetailMeta?.projectStartIso;
+    const endIso = bomPeriodBrief?.project_end ?? selectedDetailMeta?.projectEndIso;
+    if (!startIso || !endIso) return '';
+    const s = parseIsoToYearMonth(startIso);
+    const e = parseIsoToYearMonth(endIso);
+    return `${s.y}.${String(s.m).padStart(2, '0')} ~ ${e.y}.${String(e.m).padStart(2, '0')}`;
+  }, [bomPeriodBrief, selectedDetailMeta]);
+
+  useEffect(() => {
+    const vid = selectedDetailProduct ? Number(selectedDetailProduct) : NaN;
+    const bidFromBranch = selectedBranch ? Number(selectedBranch) : NaN;
+    const bidFromVariant = selectedDetailMeta?.branchId;
+    const bid = Number.isFinite(bidFromBranch)
+      ? bidFromBranch
+      : typeof bidFromVariant === 'number'
+        ? bidFromVariant
+        : NaN;
+    if (!Number.isFinite(vid) || !Number.isFinite(bid)) {
+      setBomPeriodBrief(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const b = await getOprBomPeriod(vid, bid);
+        if (!cancelled) setBomPeriodBrief(b);
+      } catch {
+        if (!cancelled) setBomPeriodBrief(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedDetailProduct, selectedBranch, selectedDetailMeta]);
+
+  /** 세부제품 선택 시 계약(프로젝트) 기간 내 월만 월 선택 UI에서 활성화 */
+  const contractMonths = useMemo((): string[] | undefined => {
+    const startIso = bomPeriodBrief?.project_start ?? selectedDetailMeta?.projectStartIso;
+    const endIso = bomPeriodBrief?.project_end ?? selectedDetailMeta?.projectEndIso;
+    if (!startIso || !endIso) return selectedDetailMeta ? [] : undefined;
+    return monthsFromProjectIso(startIso, endIso);
+  }, [bomPeriodBrief, selectedDetailMeta]);
 
   // 세부제품·월 선택 모드: 조회 월 범위를 계약기간 안으로 보정
   useEffect(() => {
@@ -326,58 +633,29 @@ export default function DataView() {
     }
   }, [selectedDetailMeta, periodMode, contractMonths, selectedPeriodStart, selectedPeriodEnd]);
 
-  // Result cards: one per 세부제품. Blue card changes when detail product changes.
-  const resultCards = useMemo((): DetailProductCard[] => {
-    if (!selectedCustomer) return [];
-    let rows = filterRows.filter((r) => r.customer === selectedCustomer);
-    if (selectedBranch) rows = rows.filter((r) => r.branch === selectedBranch);
-    if (selectedProduct) rows = rows.filter((r) => r.product === selectedProduct);
-    if (selectedDetailProduct) rows = rows.filter((r) => r.detailProduct === selectedDetailProduct);
-    return rows.map((r, i) => ({
-      id: `card-${r.customer}-${r.branch}-${r.product}-${r.detailProduct}-${i}`,
-      customer: r.customer,
-      branch: r.branch,
-      product: r.product,
-      detailProduct: r.detailProduct,
-      bomCode: r.bomCode,
-    }));
-  }, [filterRows, selectedCustomer, selectedBranch, selectedProduct, selectedDetailProduct]);
-
   // Months in selected period (for month grouping inside each blue card)
   const periodMonths = useMemo((): string[] => {
-    let start: string | null;
-    let end: string | null;
     if (selectedDetailProduct) {
-      // 세부제품 선택 시: 계약기간 사용 (auto면 selectedDetailMeta, manual이면 selectedPeriodStart/End)
       if (periodMode === 'auto' && selectedDetailMeta) {
-        start = selectedDetailMeta.projectPeriodStart;
-        end = selectedDetailMeta.projectPeriodEnd;
-      } else {
-        start = selectedPeriodStart || null;
-        end = selectedPeriodEnd || null;
+        const startIso = bomPeriodBrief?.project_start ?? selectedDetailMeta.projectStartIso;
+        const endIso = bomPeriodBrief?.project_end ?? selectedDetailMeta.projectEndIso;
+        if (!startIso || !endIso) return [];
+        return monthsFromProjectIso(startIso, endIso);
       }
-    } else {
-      start = generalPeriodStart;
-      end = generalPeriodEnd;
+      const start = selectedPeriodStart || null;
+      const end = selectedPeriodEnd || null;
+      if (!start || !end || start > end) return [];
+      return enumerateMonthsBetweenYm(start, end);
     }
+    const start = generalPeriodStart;
+    const end = generalPeriodEnd;
     if (!start || !end || start > end) return [];
-    const [sy, sm] = start.split('-').map(Number);
-    const [ey, em] = end.split('-').map(Number);
-    const months: string[] = [];
-    let y = sy, m = sm;
-    while (y < ey || (y === ey && m <= em)) {
-      months.push(`${y}-${String(m).padStart(2, '0')}`);
-      m++;
-      if (m > 12) {
-        m = 1;
-        y++;
-      }
-    }
-    return months;
+    return enumerateMonthsBetweenYm(start, end);
   }, [
     selectedDetailProduct,
     periodMode,
     selectedDetailMeta,
+    bomPeriodBrief,
     selectedPeriodStart,
     selectedPeriodEnd,
     generalPeriodStart,
@@ -408,7 +686,29 @@ export default function DataView() {
   // UI states
   const [hasQueried, setHasQueried] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
-  const [sortBy, setSortBy] = useState('latest');
+  /** 월(YYYY-MM) 정렬: 최신순(기본) = 큰 달 먼저, 오래된순 = 작은 달 먼저 */
+  const [sortBy, setSortBy] = useState<'latest' | 'oldest'>('latest');
+  const sortedQueriedPeriodMonths = useMemo(() => {
+    const m = [...queriedPeriodMonths];
+    m.sort((a, b) => a.localeCompare(b));
+    if (sortBy === 'latest') m.reverse();
+    return m;
+  }, [queriedPeriodMonths, sortBy]);
+  const displayCards = useMemo(() => {
+    let cards = [...queriedCards];
+    const q = searchTerm.trim().toLowerCase();
+    if (q) {
+      cards = cards.filter(
+        (c) =>
+          c.detailProduct.toLowerCase().includes(q) ||
+          c.product.toLowerCase().includes(q) ||
+          c.customer.toLowerCase().includes(q) ||
+          c.branch.toLowerCase().includes(q) ||
+          c.bomCode.toLowerCase().includes(q),
+      );
+    }
+    return cards;
+  }, [queriedCards, searchTerm]);
   const [showExportModal, setShowExportModal] = useState(false);
   const [selectedCompany, setSelectedCompany] = useState<DataNode | null>(null);
   // Card and node expansion states (expandedProjects = expanded card IDs)
@@ -423,12 +723,12 @@ export default function DataView() {
       hasExpandedForQueryRef.current = false;
       return;
     }
-    if (resultCards.length > 0 && !hasExpandedForQueryRef.current) {
+    if (queriedCards.length > 0 && !hasExpandedForQueryRef.current) {
       hasExpandedForQueryRef.current = true;
       setExpandedProjects(new Set()); // 파란색 카드(고객사·지사·제품·BOM 등) 접힌 상태
       setExpandedMonthSections(new Set()); // 월별 섹션 접힌 상태
     }
-  }, [hasQueried, resultCards, periodMonths]);
+  }, [hasQueried, queriedCards, periodMonths]);
 
   // 뒤로가기 시에만 조회조건 복원 (상세보기→뒤로가기). 새로고침/다른 탭 이동 시에는 복원하지 않음
   const hasRestoredRef = useRef(false);
@@ -461,7 +761,9 @@ export default function DataView() {
       if (s.selectedPcfStatus != null) setSelectedPcfStatus(String(s.selectedPcfStatus));
       if (s.hasQueried === true) setHasQueried(true);
       if (s.searchTerm != null) setSearchTerm(String(s.searchTerm));
-      if (s.sortBy != null) setSortBy(String(s.sortBy));
+      if (s.sortBy === 'oldest' || s.sortBy === 'latest') {
+        setSortBy(s.sortBy);
+      }
       if (Array.isArray(s.expandedProjects)) setExpandedProjects(new Set(s.expandedProjects as string[]));
       if (Array.isArray(s.expandedMonthSections)) setExpandedMonthSections(new Set(s.expandedMonthSections as string[]));
       if (Array.isArray(s.expandedNodes)) setExpandedNodes(new Set(s.expandedNodes as string[]));
@@ -531,17 +833,40 @@ export default function DataView() {
     validatePeriodRange(selectedPeriodStart, value);
   };
 
-  const handleQuery = () => {
+  const handleQuery = async () => {
     if (!selectedCustomer) {
       toast.error('고객사를 선택해주세요');
       return;
     }
+    const customerId = Number(selectedCustomer);
+    if (!Number.isFinite(customerId)) {
+      toast.error('고객사 정보가 올바르지 않습니다');
+      return;
+    }
+
+    const rowsForCustomer = scaffoldVariants.filter((r) => r.customerId === customerId);
+    if (!rowsForCustomer.length) {
+      toast.error('선택한 고객사에 등록된 프로젝트·제품이 없습니다');
+      return;
+    }
+
+    const custBranchId = selectedBranch ? Number(selectedBranch) : NaN;
+    const useCustomerScope = !selectedBranch || !Number.isFinite(custBranchId);
+
+    if (!useCustomerScope) {
+      const scaffoldForBranch = scaffoldVariants.filter((r) => r.branchId === custBranchId);
+      if (!scaffoldForBranch.length) {
+        toast.error('선택한 지사에 등록된 제품이 없습니다');
+        return;
+      }
+    }
 
     const hasDetailProduct = !!selectedDetailProduct;
+    const variantId = hasDetailProduct ? Number(selectedDetailProduct) : NaN;
 
     if (hasDetailProduct) {
-      if (!selectedBranch || !selectedProduct) {
-        toast.error('세부제품까지 선택할 경우 지사, 제품을 모두 선택해주세요');
+      if (!selectedProduct) {
+        toast.error('세부제품까지 선택할 경우 제품을 선택해주세요');
         return;
       }
       if (periodMode === 'manual') {
@@ -565,9 +890,112 @@ export default function DataView() {
       }
     }
 
-    setHasQueried(true);
-    // Cards and months will be computed from current selection - expand all after render
-    toast.success('조회가 완료되었습니다');
+    const body: OprQueryRequest = useCustomerScope
+      ? { opr_customer_id: customerId }
+      : { cust_branch_id: custBranchId };
+    if (selectedProduct) {
+      const pid = Number(selectedProduct);
+      if (Number.isFinite(pid)) body.product_id = pid;
+    }
+    if (hasDetailProduct && Number.isFinite(variantId)) {
+      body.product_variant_id = variantId;
+    }
+
+    let displayMonths: string[] = [];
+    if (hasDetailProduct) {
+      const vr = scaffoldVariants.find((r) => r.variantId === variantId);
+      if (!vr) {
+        toast.error('세부제품 정보를 찾을 수 없습니다');
+        return;
+      }
+      const projectMonths = monthsFromProjectIso(vr.projectStartIso, vr.projectEndIso);
+      if (periodMode === 'manual' && selectedPeriodStart && selectedPeriodEnd) {
+        const manualRange = enumerateMonthsBetweenYm(selectedPeriodStart, selectedPeriodEnd);
+        displayMonths = intersectMonthLists(projectMonths, manualRange);
+        body.selected_months = displayMonths.map((ym) => {
+          const [y, m] = ym.split('-').map(Number);
+          return [y, m];
+        });
+      } else {
+        displayMonths = [...projectMonths];
+      }
+    } else {
+      body.period_start = periodStartDate(generalPeriodStart!);
+      body.period_end = periodEndDate(generalPeriodEnd!);
+      const userMonths = enumerateMonthsBetweenYm(generalPeriodStart!, generalPeriodEnd!);
+      if (useCustomerScope) {
+        displayMonths = unionIntersectedMonthsForCustomerBranches(
+          customerId,
+          generalPeriodStart!,
+          generalPeriodEnd!,
+          scaffoldVariants,
+        );
+      } else {
+        const scaffoldForBranch = scaffoldVariants.filter((r) => r.branchId === custBranchId);
+        const projectMonths = monthsFromProjectIso(
+          scaffoldForBranch[0]!.projectStartIso,
+          scaffoldForBranch[0]!.projectEndIso,
+        );
+        displayMonths = intersectMonthLists(projectMonths, userMonths);
+      }
+    }
+
+    if (!displayMonths.length) {
+      toast.error('선택한 기간이 프로젝트 계약 기간과 겹치지 않습니다');
+      return;
+    }
+
+    setQueryLoading(true);
+    setOverviewByKey({});
+    setOverviewLoadingKey(null);
+    setOverviewErrorKey(null);
+
+    try {
+      const res = await postOprQuery(body);
+      lastQueryBodyRef.current = body;
+
+      const customerName =
+        customerOptions.find((c) => String(c.id) === selectedCustomer)?.name ?? '';
+
+      const cards: DetailProductCard[] = res.product_variants.map((pv, idx) => {
+        const sc =
+          scaffoldVariants.find(
+            (s) => s.branchId === pv.cust_branch_id && s.variantId === pv.product_variant_id,
+          ) ?? scaffoldVariants.find((s) => s.variantId === pv.product_variant_id);
+        const branchLabel =
+          branchOptions.find((b) => b.id === pv.cust_branch_id)?.name ??
+          sc?.branchName ??
+          `지사 ${pv.cust_branch_id}`;
+        const vName = (pv.product_variant_name ?? '').trim();
+        const vCode =
+          pv.product_variant_code != null ? String(pv.product_variant_code).trim() : '';
+        const detailProduct =
+          vCode && vCode !== vName ? `${vName} | ${vCode}` : vName || vCode || `세부제품 #${pv.product_variant_id}`;
+        return {
+          id: `card-${pv.cust_branch_id}-${pv.product_variant_id}-${idx}`,
+          customer: customerName || sc?.customerName || '',
+          branch: branchLabel,
+          product: pv.product_name,
+          detailProduct,
+          bomCode: pv.bom_code ?? sc?.variantCode ?? '-',
+          custBranchId: pv.cust_branch_id,
+          productVariantId: pv.product_variant_id,
+          projectId: pv.project_id,
+        };
+      });
+
+      setQueriedCards(cards);
+      setQueriedPeriodMonths(displayMonths);
+      setQueriedSummaryText(res.summary_text || '');
+      setHasQueried(true);
+      toast.success('조회가 완료되었습니다');
+    } catch (e) {
+      console.error(e);
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(`조회 실패: ${msg}`);
+    } finally {
+      setQueryLoading(false);
+    }
   };
 
   const handleReset = () => {
@@ -588,14 +1016,42 @@ export default function DataView() {
     setSelectedMaterialType('ALL');
     setSelectedMaterialName('ALL');
     setSelectedPcfStatus('ALL'); // Reset PCF status filter
+    setSortBy('latest');
     setHasQueried(false);
+    setQueriedCards([]);
+    setQueriedPeriodMonths([]);
+    setQueriedSummaryText('');
+    lastQueryBodyRef.current = null;
+    setOverviewByKey({});
+    setOverviewLoadingKey(null);
+    setOverviewErrorKey(null);
     setExpandedProjects(new Set());
     setExpandedMonthSections(new Set());
     setExpandedNodes(new Set());
   };
 
-  const handleExport = (format: 'csv' | 'xlsx') => {
-    toast.success(`${format.toUpperCase()} 파일을 다운로드합니다`);
+  const handleExport = async (format: 'csv' | 'xlsx') => {
+    const body = lastQueryBodyRef.current;
+    if (!body) {
+      toast.error('먼저 조회를 실행해 주세요');
+      return;
+    }
+    try {
+      const blob = await downloadOprExport(format, body);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = format === 'csv' ? 'opr_data_mgmt_export.csv' : 'opr_data_mgmt_export.xlsx';
+      a.rel = 'noopener';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      toast.success(`${format.toUpperCase()} 다운로드를 시작합니다`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(`다운로드 실패: ${msg}`);
+    }
   };
 
   const toggleProject = (projectId: string) => {
@@ -618,15 +1074,35 @@ export default function DataView() {
     setExpandedNodes(newExpanded);
   };
 
-  const toggleMonthSection = (cardId: string, month: string) => {
-    const key = `${cardId}-${month}`;
+  const toggleMonthSection = async (card: DetailProductCard, month: string) => {
+    const key = `${card.id}-${month}`;
     const newExpanded = new Set(expandedMonthSections);
-    if (newExpanded.has(key)) {
-      newExpanded.delete(key);
-    } else {
+    const willExpand = !newExpanded.has(key);
+    if (willExpand) {
       newExpanded.add(key);
+    } else {
+      newExpanded.delete(key);
     }
     setExpandedMonthSections(newExpanded);
+
+    if (willExpand && card.custBranchId && card.productVariantId) {
+      const [y, m] = month.split('-').map(Number);
+      if (!overviewByKey[key]) {
+        setOverviewLoadingKey(key);
+        setOverviewErrorKey(null);
+        try {
+          const ov = await getOprMonthlyOverview(card.productVariantId, y, m, card.custBranchId);
+          const tree = monthlyRowsToTree(ov.rows, card.id, month);
+          setOverviewByKey((prev) => ({ ...prev, [key]: tree }));
+        } catch (e) {
+          console.error(e);
+          setOverviewErrorKey(key);
+          toast.error('월별 공급망 데이터를 불러오지 못했습니다');
+        } finally {
+          setOverviewLoadingKey(null);
+        }
+      }
+    }
   };
 
   const handleViewMap = (_card: DetailProductCard) => {
@@ -723,7 +1199,7 @@ export default function DataView() {
     const isEmptyPlaceholder = node.id === 'empty-tier0';
 
     /* 상세보기 열 좌측 이동(우측에 스페이서 추가), 공급망 PCF 보기 버튼은 헤더 우측 유지 */
-    const gridCols = 'minmax(150px, 180px) minmax(70px, 90px) 0.5fr minmax(0,1fr) minmax(100px, 130px) minmax(90px, 120px) minmax(115px, 150px) minmax(0,1fr) minmax(115px, 150px) minmax(0,1fr) minmax(90px, 110px) minmax(0,1fr)';
+    const gridCols = DATA_VIEW_MONTH_TREE_GRID_COLS;
     const tierStyle = getTierBadgeStyle(node.tier);
 
     return (
@@ -765,8 +1241,8 @@ export default function DataView() {
               </span>
             </div>
 
-            {/* Company Name */}
-            <div className="min-w-0">
+            {/* Company Name — 그리드 트랙 최소 너비와 함께 셀에도 min-width로 가시성 보장 */}
+            <div className="min-w-[140px] overflow-hidden">
               <div className="font-medium text-gray-900 truncate">{node.companyName}</div>
               <div className="text-xs text-gray-500 truncate">{node.companyNameEn}</div>
             </div>
@@ -850,6 +1326,14 @@ export default function DataView() {
                   if (node.tier === 'Tier 0') {
                     route = `/dashboard/data-view/tier0/${node.id}`;
                   } else if (node.companyType === 'Supplier') {
+                    saveSupplierDetailSnapshot(node.id, {
+                      companyName: node.companyName,
+                      companyNameEn: node.companyNameEn,
+                      tier: node.tier,
+                      country: node.country,
+                      productType: node.productType,
+                      pcfResult: node.pcfResult,
+                    });
                     route = `/dashboard/data-view/supplier/${node.id}`;
                   } else {
                     route = `/dashboard/data-view/company/${node.id}`;
@@ -964,12 +1448,12 @@ export default function DataView() {
         {/* Month sections + Tree (Tier 0부터 하위 협력사) */}
         {isCardExpanded && (
           <div className="mt-2 space-y-2">
-            {periodMonths.length === 0 ? (
+            {queriedPeriodMonths.length === 0 ? (
               <div className="bg-white rounded-xl p-8 text-center text-gray-500" style={{ border: '1px solid #E5E7EB' }}>
                 조회 기간을 선택해주세요
               </div>
             ) : (
-              periodMonths.map((month) => {
+              sortedQueriedPeriodMonths.map((month) => {
                 const monthKey = `${card.id}-${month}`;
                 const isMonthExpanded = expandedMonthSections.has(monthKey);
 
@@ -978,7 +1462,7 @@ export default function DataView() {
                     {/* Month section header - collapsible, 공급망 PCF 보기 버튼 */}
                     <div
                       className="flex items-center justify-between gap-3 px-4 py-3 bg-gray-50 border-b border-gray-200 cursor-pointer hover:bg-gray-100"
-                      onClick={() => toggleMonthSection(card.id, month)}
+                      onClick={() => void toggleMonthSection(card, month)}
                     >
                       <div className="flex items-center gap-3">
                         <button className="p-1 hover:bg-gray-200 rounded transition-colors" type="button">
@@ -1024,7 +1508,7 @@ export default function DataView() {
                         <div className="bg-gray-50 border-b border-gray-200">
                           <div
                             className="grid items-center px-4 py-3 gap-x-2 text-xs font-medium text-gray-700 w-full"
-                            style={{ gridTemplateColumns: 'minmax(150px, 180px) minmax(70px, 90px) 0.5fr minmax(0,1fr) minmax(100px, 130px) minmax(90px, 120px) minmax(115px, 150px) minmax(0,1fr) minmax(115px, 150px) minmax(0,1fr) minmax(90px, 110px) minmax(0,1fr)' }}
+                            style={{ gridTemplateColumns: DATA_VIEW_MONTH_TREE_GRID_COLS }}
                           >
                             <div></div>
                             <div>Tier</div>
@@ -1040,7 +1524,17 @@ export default function DataView() {
                             <div></div>
                           </div>
                         </div>
-                        {renderNode(getSampleSupplyChainTree(card.id, month))}
+                        {overviewLoadingKey === monthKey ? (
+                          <div className="p-8 text-center text-gray-500">불러오는 중…</div>
+                        ) : overviewErrorKey === monthKey ? (
+                          <div className="p-8 text-center text-red-600">
+                            데이터를 불러오지 못했습니다. 다시 펼쳐 보세요.
+                          </div>
+                        ) : overviewByKey[monthKey] ? (
+                          renderNode(overviewByKey[monthKey])
+                        ) : (
+                          <div className="p-8 text-center text-gray-500">불러오는 중…</div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -1089,8 +1583,10 @@ export default function DataView() {
               className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5B3BFA]"
             >
               <option value="">선택</option>
-              {customerOptions.map((customer) => (
-                <option key={customer} value={customer}>{customer}</option>
+              {customerOptions.map((c) => (
+                <option key={c.id} value={String(c.id)}>
+                  {c.name}
+                </option>
               ))}
             </select>
           </div>
@@ -1109,8 +1605,10 @@ export default function DataView() {
               className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5B3BFA] disabled:bg-gray-100"
             >
               <option value="">선택</option>
-              {branchOptions.map((branch) => (
-                <option key={branch} value={branch}>{branch}</option>
+              {branchOptions.map((b) => (
+                <option key={b.id} value={String(b.id)}>
+                  {b.name}
+                </option>
               ))}
             </select>
           </div>
@@ -1119,7 +1617,7 @@ export default function DataView() {
             <label className="block text-sm font-medium mb-2">제품</label>
             <select
               value={selectedProduct}
-              disabled={!selectedBranch}
+              disabled={!selectedCustomer}
               onChange={(e) => {
                 setSelectedProduct(e.target.value);
                 setSelectedDetailProduct('');
@@ -1128,8 +1626,10 @@ export default function DataView() {
               className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5B3BFA] disabled:bg-gray-100"
             >
               <option value="">선택</option>
-              {productOptions.map((product) => (
-                <option key={product} value={product}>{product}</option>
+              {productOptions.map((p) => (
+                <option key={p.id} value={String(p.id)}>
+                  {p.name}
+                </option>
               ))}
             </select>
           </div>
@@ -1146,8 +1646,12 @@ export default function DataView() {
               className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5B3BFA] disabled:bg-gray-100"
             >
               <option value="">선택</option>
-              {detailProductOptions.map((detail) => (
-                <option key={detail.detailProduct} value={detail.detailProduct}>{detail.detailProduct}</option>
+              {detailProductOptions.map((row) => (
+                <option key={`${row.branchId}-${row.variantId}`} value={String(row.variantId)}>
+                  {row.variantCode
+                    ? `${row.variantName} | ${row.variantCode}`
+                    : row.variantName}
+                </option>
               ))}
             </select>
           </div>
@@ -1155,7 +1659,7 @@ export default function DataView() {
           <div>
             <label className="block text-sm font-medium mb-2">BOM Code</label>
             <div className="w-full px-4 py-2.5 border border-gray-300 rounded-xl bg-gray-50 text-gray-700">
-              {selectedDetailMeta?.bomCode || '-'}
+              {bomPeriodBrief?.bom_code ?? selectedDetailMeta?.variantCode ?? '-'}
             </div>
           </div>
 
@@ -1201,7 +1705,7 @@ export default function DataView() {
             </div>
             {periodMode === 'auto' ? (
               <div className="w-full px-4 py-2.5 border border-gray-300 rounded-xl bg-gray-50 text-gray-700">
-                {selectedDetailMeta?.projectPeriodLabel || '세부제품 선택 시 자동 표시'}
+                {projectPeriodLabelDisplay || '세부제품 선택 시 자동 표시'}
               </div>
             ) : (
               <MonthRangePicker
@@ -1228,14 +1732,16 @@ export default function DataView() {
         {/* Action Buttons */}
         <div className="flex flex-wrap gap-3">
           <button
-            onClick={handleQuery}
-            className="px-6 py-3 text-white rounded-xl font-medium transition-all hover:scale-105"
+            type="button"
+            onClick={() => void handleQuery()}
+            disabled={queryLoading || scaffoldLoading}
+            className="px-6 py-3 text-white rounded-xl font-medium transition-all hover:scale-105 disabled:opacity-50 disabled:pointer-events-none"
             style={{
               background: 'linear-gradient(90deg, #5B3BFA 0%, #00B4FF 100%)',
               boxShadow: '0px 4px 12px rgba(91,59,250,0.2)',
             }}
           >
-            조회
+            {queryLoading ? '조회 중…' : '조회'}
           </button>
 
           <button
@@ -1279,13 +1785,16 @@ export default function DataView() {
               <div className="flex items-center gap-4 flex-1 min-w-0">
                 <span className="font-semibold whitespace-nowrap">
                   조회 결과: <span className={mode === 'procurement' ? 'text-[#5B3BFA]' : 'text-[#00B4FF]'}>
-                    {resultCards.length}개 세부제품
+                    {displayCards.length}개 세부제품
                   </span>
-                  {periodMonths.length > 0 && (
+                  {queriedPeriodMonths.length > 0 && (
                     <> / <span className={mode === 'procurement' ? 'text-[#5B3BFA]' : 'text-[#00B4FF]'}>
-                      {periodMonths.length}개 월
+                      {queriedPeriodMonths.length}개 월
                     </span></>
                   )}
+                  {queriedSummaryText ? (
+                    <span className="text-gray-500 font-normal text-sm ml-2">({queriedSummaryText})</span>
+                  ) : null}
                 </span>
 
                 <div className="relative flex-1 max-w-md">
@@ -1301,12 +1810,11 @@ export default function DataView() {
 
                 <select
                   value={sortBy}
-                  onChange={(e) => setSortBy(e.target.value)}
+                  onChange={(e) => setSortBy(e.target.value as 'latest' | 'oldest')}
                   className="px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#5B3BFA]"
                 >
                   <option value="latest">최신순</option>
-                  <option value="project">프로젝트명</option>
-                  <option value="customer">고객사</option>
+                  <option value="oldest">오래된순</option>
                 </select>
               </div>
 
@@ -1344,12 +1852,12 @@ export default function DataView() {
 
           {/* Detail Product Cards (세부제품별 파란 카드) */}
           <div>
-            {resultCards.length === 0 ? (
+            {displayCards.length === 0 ? (
               <div className="bg-white p-12 text-center rounded-xl" style={{ border: '1px solid #E5E7EB' }}>
-                <p className="text-gray-500">조회 조건에 맞는 세부제품이 없습니다. 고객사, 지사, 제품을 선택해주세요.</p>
+                <p className="text-gray-500">조회 조건에 맞는 세부제품이 없습니다. 고객사·지사·기간을 확인해 주세요.</p>
               </div>
             ) : (
-              resultCards.map((card) => renderDetailProductCard(card))
+              displayCards.map((card) => renderDetailProductCard(card))
             )}
           </div>
         </>

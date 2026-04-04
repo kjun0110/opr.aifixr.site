@@ -1,36 +1,62 @@
 'use client';
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { ChevronRight, ChevronDown, Download, CheckCircle, Clock, AlertTriangle, FileText, Network, TrendingUp, Play, Info, X, Calculator, History, Eye } from 'lucide-react';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
 import * as XLSX from 'xlsx';
 import MonthPicker from './MonthPicker';
 import { useMode } from '../context/ModeContext';
+import { apiFetch, restoreOprSessionFromCookie } from '@/lib/api/client';
+import { getOprAccessToken } from '@/lib/api/sessionAccessToken';
+import { getOprBomPeriod } from '@/lib/api/dataMgmtOpr';
 
-// PCF 산정용 조회 조건 (데이터관리와 동일 구조)
-type PcfFilterRow = {
-  customer: string;
-  branch: string;
-  product: string;
-  detailProduct: string;
-  bomCode: string;
-  projectPeriodStart: string;
-  projectPeriodEnd: string;
+/** 데이터 관리(DataView)와 동일: 공급망 API로 고객→지사→제품→세부제품 스캐폴드 */
+type ScaffoldVariantRow = {
+  customerId: number;
+  customerName: string;
+  branchId: number;
+  branchName: string;
+  projectId: number;
+  projectStartIso: string;
+  projectEndIso: string;
+  productId: number;
+  productName: string;
+  variantId: number;
+  variantName: string;
+  variantCode: string | null;
 };
 
-// 2025년 1·2분기(1~6월)만 프로젝트 기간으로 설정
-const pcfFilterRows: PcfFilterRow[] = [
-  { customer: 'A 자동차', branch: '국내사업본부', product: '배터리 모듈 A', detailProduct: '배터리 모듈 A-1 (표준형)', bomCode: 'BOM_A_001', projectPeriodStart: '2025-01', projectPeriodEnd: '2025-06' },
-  { customer: 'A 자동차', branch: '국내사업본부', product: '배터리 모듈 A', detailProduct: '배터리 모듈 A-2 (고용량)', bomCode: 'BOM_A_002', projectPeriodStart: '2025-01', projectPeriodEnd: '2025-06' },
-  { customer: 'A 자동차', branch: '해외사업본부', product: '배터리 모듈 A', detailProduct: '배터리 모듈 A-1 (표준형)', bomCode: 'BOM_A_001', projectPeriodStart: '2025-01', projectPeriodEnd: '2025-06' },
-  { customer: 'A 자동차', branch: '해외사업본부', product: '배터리 모듈 A', detailProduct: '배터리 모듈 A-2 (고용량)', bomCode: 'BOM_A_002', projectPeriodStart: '2025-01', projectPeriodEnd: '2025-06' },
-  { customer: 'B 모빌리티', branch: '전동화사업부', product: '전고체 셀', detailProduct: '전고체 셀 60Ah', bomCode: 'BOM_SSC_60', projectPeriodStart: '2025-01', projectPeriodEnd: '2025-06' },
-  { customer: 'B 모빌리티', branch: '전동화사업부', product: '전고체 셀', detailProduct: '전고체 셀 80Ah', bomCode: 'BOM_SSC_80', projectPeriodStart: '2025-01', projectPeriodEnd: '2025-06' },
-  { customer: 'B 모빌리티', branch: '에너지사업부', product: 'ESS 팩', detailProduct: 'ESS 팩 1MWh', bomCode: 'BOM_ESS_1', projectPeriodStart: '2025-01', projectPeriodEnd: '2025-06' },
-  { customer: 'B 모빌리티', branch: '에너지사업부', product: 'ESS 팩', detailProduct: 'ESS 팩 2MWh', bomCode: 'BOM_ESS_2', projectPeriodStart: '2025-01', projectPeriodEnd: '2025-06' },
-  { customer: 'C 그룹', branch: 'R&D센터', product: '배터리 모듈 A', detailProduct: '배터리 모듈 A-1 (표준형)', bomCode: 'BOM_A_001', projectPeriodStart: '2025-01', projectPeriodEnd: '2025-06' },
-];
+function parseIsoToYearMonth(iso: string): { y: number; m: number } {
+  const d = new Date(iso);
+  return { y: d.getFullYear(), m: d.getMonth() + 1 };
+}
+
+function enumerateMonthsBetweenYm(startYm: string, endYm: string): string[] {
+  if (!startYm || !endYm || startYm > endYm) return [];
+  const [sy, sm] = startYm.split('-').map(Number);
+  const [ey, em] = endYm.split('-').map(Number);
+  const out: string[] = [];
+  let y = sy;
+  let m = sm;
+  while (y < ey || (y === ey && m <= em)) {
+    out.push(`${y}-${String(m).padStart(2, '0')}`);
+    m++;
+    if (m > 12) {
+      m = 1;
+      y++;
+    }
+  }
+  return out;
+}
+
+function monthsFromProjectIso(startIso: string, endIso: string): string[] {
+  const s = parseIsoToYearMonth(startIso);
+  const e = parseIsoToYearMonth(endIso);
+  const startYm = `${s.y}-${String(s.m).padStart(2, '0')}`;
+  const endYm = `${e.y}-${String(e.m).padStart(2, '0')}`;
+  return enumerateMonthsBetweenYm(startYm, endYm);
+}
 
 // Types
 interface Customer {
@@ -342,37 +368,262 @@ export default function PcfCalculation() {
   
   // 세부탭 상태
   const [activeTab, setActiveTab] = useState<'calculation' | 'history'>('calculation');
+
+  const [scaffoldVariants, setScaffoldVariants] = useState<ScaffoldVariantRow[]>([]);
+  const [scaffoldLoading, setScaffoldLoading] = useState(false);
+  const [bomPeriodBrief, setBomPeriodBrief] = useState<{
+    bom_code: string | null;
+    project_start: string;
+    project_end: string;
+  } | null>(null);
   
-  // Selection states
+  // Selection states (값은 DB id 문자열, 데이터 관리와 동일)
   const [selectedCustomer, setSelectedCustomer] = useState<string>('');
   const [selectedBranch, setSelectedBranch] = useState<string>('');
   const [selectedProduct, setSelectedProduct] = useState<string>('');
   const [selectedDetailProduct, setSelectedDetailProduct] = useState<string>('');
-  const [selectedBomCode, setSelectedBomCode] = useState<string>('');
   const [selectedMonth, setSelectedMonth] = useState<string | null>(null);
 
-  // 필터 옵션
-  const customerOptions = useMemo(() => Array.from(new Set(pcfFilterRows.map(r => r.customer))).sort((a, b) => a.localeCompare(b)), []);
-  const branchOptions = useMemo(() => Array.from(new Set(pcfFilterRows.filter(r => r.customer === selectedCustomer).map(r => r.branch))).sort((a, b) => a.localeCompare(b)), [selectedCustomer]);
-  const productOptions = useMemo(() => Array.from(new Set(pcfFilterRows.filter(r => r.customer === selectedCustomer && r.branch === selectedBranch).map(r => r.product))).sort((a, b) => a.localeCompare(b)), [selectedCustomer, selectedBranch]);
-  const detailProductOptions = useMemo(() => pcfFilterRows.filter(r => r.customer === selectedCustomer && r.branch === selectedBranch && r.product === selectedProduct).sort((a, b) => a.detailProduct.localeCompare(b.detailProduct)), [selectedCustomer, selectedBranch, selectedProduct]);
-  const selectedDetailMeta = useMemo(() => detailProductOptions.find(r => r.detailProduct === selectedDetailProduct), [detailProductOptions, selectedDetailProduct]);
+  useEffect(() => {
+    let mounted = true;
+    let loadAttempted = false;
 
-  // 프로젝트 기간 내 월 목록
-  const projectPeriodMonths = useMemo((): string[] => {
-    if (!selectedDetailMeta) return [];
-    const { projectPeriodStart, projectPeriodEnd } = selectedDetailMeta;
-    const [sy, sm] = projectPeriodStart.split('-').map(Number);
-    const [ey, em] = projectPeriodEnd.split('-').map(Number);
-    const months: string[] = [];
-    let y = sy, m = sm;
-    while (y < ey || (y === ey && m <= em)) {
-      months.push(`${y}-${String(m).padStart(2, '0')}`);
-      m++;
-      if (m > 12) { m = 1; y++; }
+    const loadScaffold = async () => {
+      if (loadAttempted) return;
+      loadAttempted = true;
+      setScaffoldLoading(true);
+      try {
+        if (typeof window !== 'undefined' && !getOprAccessToken()) {
+          await restoreOprSessionFromCookie();
+        }
+        const customers = await apiFetch<{ id: number; name: string }[]>(
+          '/api/supply-chain/project-supply-chain/customers',
+        );
+        const allBranchesNested = await Promise.all(
+          customers.map(async (customer) => {
+            try {
+              const branches = await apiFetch<{ id: number; name?: string }[]>(
+                `/api/supply-chain/project-supply-chain/customers/${customer.id}/branches`,
+              );
+              return branches.map((b) => ({ customer, branch: b }));
+            } catch {
+              return [];
+            }
+          }),
+        );
+        const allBranches = allBranchesNested.flat();
+
+        const allProjectsResults = await Promise.all(
+          allBranches.map(async ({ customer, branch }) => {
+            try {
+              const project = await apiFetch<{
+                id: number;
+                start_date: string;
+                end_date: string;
+              }>(`/api/supply-chain/project-supply-chain/branches/${branch.id}/project`);
+              return { customer, branch, project };
+            } catch {
+              return null;
+            }
+          }),
+        );
+        const allProjects = allProjectsResults.filter(
+          (x): x is NonNullable<typeof x> => x !== null,
+        );
+
+        const allProductsNested = await Promise.all(
+          allProjects.map(async ({ customer, branch, project }) => {
+            try {
+              const products = await apiFetch<{ id: number; name: string }[]>(
+                `/api/supply-chain/project-supply-chain/projects/${project.id}/products`,
+              );
+              return products.map((prod) => ({ customer, branch, project, product: prod }));
+            } catch {
+              return [];
+            }
+          }),
+        );
+        const allProductsFlat = allProductsNested.flat();
+
+        const allVariantsNested = await Promise.all(
+          allProductsFlat.map(async (item) => {
+            try {
+              const variants = await apiFetch<
+                { id: number; name: string; code?: string | null }[]
+              >(
+                `/api/supply-chain/project-supply-chain/projects/${item.project.id}/products/${item.product.id}/product-variants`,
+              );
+              return variants.map((v) => ({ ...item, variant: v }));
+            } catch {
+              return [];
+            }
+          }),
+        );
+        const allVariants = allVariantsNested.flat();
+
+        const rows: ScaffoldVariantRow[] = allVariants.map((item) => ({
+          customerId: item.customer.id,
+          customerName: item.customer.name || `고객 #${item.customer.id}`,
+          branchId: item.branch.id,
+          branchName: item.branch.name ?? `지사 #${item.branch.id}`,
+          projectId: item.project.id,
+          projectStartIso: item.project.start_date,
+          projectEndIso: item.project.end_date,
+          productId: item.product.id,
+          productName: item.product.name,
+          variantId: item.variant.id,
+          variantName: item.variant.name,
+          variantCode: item.variant.code ?? null,
+        }));
+
+        if (mounted) setScaffoldVariants(rows);
+      } catch (e) {
+        console.error('PcfCalculation scaffold load failed', e);
+        if (mounted) {
+          toast.error('고객사·제품 목록을 불러오지 못했습니다. 공급망 API를 확인해 주세요.');
+        }
+      } finally {
+        if (mounted) setScaffoldLoading(false);
+      }
+    };
+
+    void loadScaffold();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const customerOptions = useMemo(() => {
+    const byId = new Map<number, string>();
+    for (const r of scaffoldVariants) {
+      if (!byId.has(r.customerId)) byId.set(r.customerId, r.customerName);
     }
-    return months;
-  }, [selectedDetailMeta]);
+    return [...byId.entries()]
+      .sort((a, b) => a[1].localeCompare(b[1]))
+      .map(([id, name]) => ({ id, name }));
+  }, [scaffoldVariants]);
+
+  const branchOptions = useMemo(() => {
+    if (!selectedCustomer) return [];
+    const cid = Number(selectedCustomer);
+    if (!Number.isFinite(cid)) return [];
+    const byId = new Map<number, string>();
+    for (const r of scaffoldVariants) {
+      if (r.customerId === cid && !byId.has(r.branchId)) byId.set(r.branchId, r.branchName);
+    }
+    return [...byId.entries()]
+      .sort((a, b) => a[1].localeCompare(b[1]))
+      .map(([id, name]) => ({ id, name }));
+  }, [scaffoldVariants, selectedCustomer]);
+
+  const productOptions = useMemo(() => {
+    if (!selectedCustomer) return [];
+    const cid = Number(selectedCustomer);
+    if (!Number.isFinite(cid)) return [];
+    const byId = new Map<number, string>();
+    for (const r of scaffoldVariants) {
+      if (r.customerId !== cid) continue;
+      if (selectedBranch) {
+        const bid = Number(selectedBranch);
+        if (!Number.isFinite(bid) || r.branchId !== bid) continue;
+      }
+      if (!byId.has(r.productId)) byId.set(r.productId, r.productName);
+    }
+    return [...byId.entries()]
+      .sort((a, b) => a[1].localeCompare(b[1]))
+      .map(([id, name]) => ({ id, name }));
+  }, [scaffoldVariants, selectedCustomer, selectedBranch]);
+
+  const detailProductOptions = useMemo(() => {
+    if (!selectedCustomer || !selectedProduct) return [];
+    const cid = Number(selectedCustomer);
+    const pid = Number(selectedProduct);
+    if (!Number.isFinite(cid) || !Number.isFinite(pid)) return [];
+    const bid = selectedBranch ? Number(selectedBranch) : NaN;
+    const hasBranch = selectedBranch && Number.isFinite(bid);
+    return scaffoldVariants
+      .filter((r) => {
+        if (r.customerId !== cid || r.productId !== pid) return false;
+        if (hasBranch) return r.branchId === bid;
+        return true;
+      })
+      .sort((a, b) => a.variantName.localeCompare(b.variantName));
+  }, [scaffoldVariants, selectedCustomer, selectedBranch, selectedProduct]);
+
+  const selectedDetailMeta = useMemo(() => {
+    if (!selectedDetailProduct) return null;
+    const vid = Number(selectedDetailProduct);
+    if (!Number.isFinite(vid)) return null;
+    const fromList = detailProductOptions.find((row) => row.variantId === vid);
+    if (fromList) return fromList;
+    return scaffoldVariants.find((r) => r.variantId === vid) ?? null;
+  }, [detailProductOptions, selectedDetailProduct, scaffoldVariants]);
+
+  useEffect(() => {
+    const vid = selectedDetailProduct ? Number(selectedDetailProduct) : NaN;
+    const bidFromBranch = selectedBranch ? Number(selectedBranch) : NaN;
+    const bidFromVariant = selectedDetailMeta?.branchId;
+    const bid = Number.isFinite(bidFromBranch)
+      ? bidFromBranch
+      : typeof bidFromVariant === 'number'
+        ? bidFromVariant
+        : NaN;
+    if (!Number.isFinite(vid) || !Number.isFinite(bid)) {
+      setBomPeriodBrief(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        if (typeof window !== 'undefined' && !getOprAccessToken()) {
+          await restoreOprSessionFromCookie();
+        }
+        const b = await getOprBomPeriod(vid, bid);
+        if (!cancelled) setBomPeriodBrief(b);
+      } catch {
+        if (!cancelled) setBomPeriodBrief(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedDetailProduct, selectedBranch, selectedDetailMeta?.branchId]);
+
+  const displayBomCode = bomPeriodBrief?.bom_code?.trim() || '';
+
+  const projectPeriodMonths = useMemo((): string[] => {
+    if (bomPeriodBrief?.project_start && bomPeriodBrief?.project_end) {
+      return monthsFromProjectIso(bomPeriodBrief.project_start, bomPeriodBrief.project_end);
+    }
+    if (!selectedDetailMeta) return [];
+    return monthsFromProjectIso(selectedDetailMeta.projectStartIso, selectedDetailMeta.projectEndIso);
+  }, [bomPeriodBrief, selectedDetailMeta]);
+
+  const selectionSummaryText = useMemo(() => {
+    const cn =
+      customerOptions.find((c) => String(c.id) === selectedCustomer)?.name ?? '';
+    const bn =
+      branchOptions.find((b) => String(b.id) === selectedBranch)?.name ?? '';
+    const pn =
+      productOptions.find((p) => String(p.id) === selectedProduct)?.name ?? '';
+    const dn = selectedDetailMeta
+      ? selectedDetailMeta.variantCode
+        ? `${selectedDetailMeta.variantName} | ${selectedDetailMeta.variantCode}`
+        : selectedDetailMeta.variantName
+      : '';
+    const bom = displayBomCode || '-';
+    return [cn, bn, pn, dn, bom, selectedMonth].filter(Boolean).join(' / ');
+  }, [
+    customerOptions,
+    branchOptions,
+    productOptions,
+    selectedCustomer,
+    selectedBranch,
+    selectedProduct,
+    selectedDetailMeta,
+    displayBomCode,
+    selectedMonth,
+  ]);
 
   // 데이터 준비 상태 (시뮬레이션)
   const [dataScenario, setDataScenario] = useState<'primary_only' | 'complete'>('primary_only');
@@ -410,7 +661,6 @@ export default function PcfCalculation() {
     selectedBranch !== '' &&
     selectedProduct !== '' &&
     selectedDetailProduct !== '' &&
-    selectedBomCode !== '' &&
     selectedMonth != null &&
     projectPeriodMonths.includes(selectedMonth);
 
@@ -1027,20 +1277,22 @@ export default function PcfCalculation() {
                 </label>
                 <select
                   value={selectedCustomer}
+                  disabled={scaffoldLoading}
                   onChange={(e) => {
                     setSelectedCustomer(e.target.value);
                     setSelectedBranch('');
                     setSelectedProduct('');
                     setSelectedDetailProduct('');
-                    setSelectedBomCode('');
                     setSelectedMonth(null);
                   }}
-                  className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5B3BFA]"
+                  className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5B3BFA] disabled:bg-gray-100"
                 >
-                  <option value="">고객사를 선택하세요</option>
+                  <option value="">
+                    {scaffoldLoading ? '목록 불러오는 중…' : '고객사를 선택하세요'}
+                  </option>
                   {customerOptions.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
+                    <option key={c.id} value={String(c.id)}>
+                      {c.name}
                     </option>
                   ))}
                 </select>
@@ -1050,20 +1302,19 @@ export default function PcfCalculation() {
                 <label className="block text-sm font-medium mb-2">세부지사</label>
                 <select
                   value={selectedBranch}
-                  disabled={!selectedCustomer}
+                  disabled={!selectedCustomer || scaffoldLoading}
                   onChange={(e) => {
                     setSelectedBranch(e.target.value);
                     setSelectedProduct('');
                     setSelectedDetailProduct('');
-                    setSelectedBomCode('');
                     setSelectedMonth(null);
                   }}
                   className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5B3BFA] disabled:bg-gray-100"
                 >
                   <option value="">세부지사를 선택하세요</option>
                   {branchOptions.map((b) => (
-                    <option key={b} value={b}>
-                      {b}
+                    <option key={b.id} value={String(b.id)}>
+                      {b.name}
                     </option>
                   ))}
                 </select>
@@ -1073,19 +1324,18 @@ export default function PcfCalculation() {
                 <label className="block text-sm font-medium mb-2">제품</label>
                 <select
                   value={selectedProduct}
-                  disabled={!selectedBranch}
+                  disabled={!selectedCustomer || scaffoldLoading}
                   onChange={(e) => {
                     setSelectedProduct(e.target.value);
                     setSelectedDetailProduct('');
-                    setSelectedBomCode('');
                     setSelectedMonth(null);
                   }}
                   className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5B3BFA] disabled:bg-gray-100"
                 >
                   <option value="">제품을 선택하세요</option>
                   {productOptions.map((p) => (
-                    <option key={p} value={p}>
-                      {p}
+                    <option key={p.id} value={String(p.id)}>
+                      {p.name}
                     </option>
                   ))}
                 </select>
@@ -1095,20 +1345,17 @@ export default function PcfCalculation() {
                 <label className="block text-sm font-medium mb-2">세부제품</label>
                 <select
                   value={selectedDetailProduct}
-                  disabled={!selectedProduct}
+                  disabled={!selectedProduct || scaffoldLoading}
                   onChange={(e) => {
-                    const val = e.target.value;
-                    setSelectedDetailProduct(val);
-                    const meta = detailProductOptions.find((d) => d.detailProduct === val);
-                    setSelectedBomCode(meta?.bomCode || '');
+                    setSelectedDetailProduct(e.target.value);
                     setSelectedMonth(null);
                   }}
                   className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5B3BFA] disabled:bg-gray-100"
                 >
                   <option value="">세부제품을 선택하세요</option>
                   {detailProductOptions.map((d) => (
-                    <option key={d.detailProduct} value={d.detailProduct}>
-                      {d.detailProduct}
+                    <option key={d.variantId} value={String(d.variantId)}>
+                      {d.variantCode ? `${d.variantName} | ${d.variantCode}` : d.variantName}
                     </option>
                   ))}
                 </select>
@@ -1117,7 +1364,7 @@ export default function PcfCalculation() {
               <div>
                 <label className="block text-sm font-medium mb-2">BOM Code</label>
                 <div className="w-full px-4 py-2.5 border border-gray-300 rounded-xl bg-gray-50 text-gray-700">
-                  {selectedBomCode || '-'}
+                  {displayBomCode || '-'}
                 </div>
               </div>
 
@@ -1140,7 +1387,7 @@ export default function PcfCalculation() {
               <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
                 <div className="text-sm font-medium text-gray-700">
                   <span className="text-[#00B4FF] font-bold">선택된 산정 대상:</span>{' '}
-                  {selectedCustomer} / {selectedBranch} / {selectedProduct} / {selectedDetailProduct} / {selectedBomCode} / {selectedMonth}
+                  {selectionSummaryText}
                 </div>
               </div>
             )}
