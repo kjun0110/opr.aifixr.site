@@ -7,8 +7,18 @@ import { getOprAccessToken } from '@/lib/api/sessionAccessToken';
 import {
   getOprAnchorCompany,
   getOprTier0RowContext,
+  getOprTier0FactoryData,
+  downloadOprTier0ExportXlsx,
+  postOprTier0ImportPreview,
+  putOprTier0FactoryData,
   type OprAnchorCompanyResponse,
+  type OprTier0EnergyRowApi,
+  type OprTier0FactoryDataSaveRequest,
+  type OprTier0ImportPreviewResponse,
+  type OprTier0MaterialRowApi,
+  type OprTier0ProductionRowApi,
   type OprTier0RowContextResponse,
+  type OprTier0WorkplaceContactRowApi,
 } from '@/lib/api/dataMgmtOpr';
 import { getOprDataViewContacts, type OprDataViewContactRow } from '@/lib/api/iamOpr';
 import { useParams, useRouter } from 'next/navigation';
@@ -24,7 +34,10 @@ import {
   FileText,
   Save,
   ChevronDown,
+  X,
+  TableProperties,
 } from 'lucide-react';
+import { EprCo2eFactorPickerModal } from './EprCo2eFactorPickerModal';
 import { toast } from 'sonner';
 import { useMode } from '../context/ModeContext';
 
@@ -81,6 +94,8 @@ interface Tier0DetailData {
     unit: string;
     hsCode: string;
     emissionFactorId: string;
+    /** 공급망 1차사와 계약된 품목(투입 자재명 제안 목록 필터용; API 연동 시 서버 값으로 대체 가능) */
+    tier1Contract?: boolean;
   }[];
   
   facilityInfo: {
@@ -185,6 +200,7 @@ const mockTier0Data: Record<string, Tier0DetailData> = {
         unit: 'EA',
         hsCode: '8507.60.00',
         emissionFactorId: 'EF-2026-001',
+        tier1Contract: true,
       },
       {
         materialId: 'MAT-002',
@@ -192,6 +208,7 @@ const mockTier0Data: Record<string, Tier0DetailData> = {
         unit: 'SET',
         hsCode: '8537.10.00',
         emissionFactorId: 'EF-2026-002',
+        tier1Contract: true,
       },
       {
         materialId: 'MAT-003',
@@ -199,6 +216,7 @@ const mockTier0Data: Record<string, Tier0DetailData> = {
         unit: 'kg',
         hsCode: '7606.12.00',
         emissionFactorId: 'EF-2026-003',
+        tier1Contract: false,
       },
     ],
     facilityInfo: [
@@ -327,6 +345,7 @@ const mockTier0Data: Record<string, Tier0DetailData> = {
         unit: 'EA',
         hsCode: '8507.60.00',
         emissionFactorId: 'EF-2026-001',
+        tier1Contract: true,
       },
     ],
     facilityInfo: [
@@ -418,6 +437,7 @@ const mockTier0Data: Record<string, Tier0DetailData> = {
         unit: 'EA',
         hsCode: '8507.60.00',
         emissionFactorId: 'EF-2026-001',
+        tier1Contract: true,
       },
       {
         materialId: 'MAT-004',
@@ -425,6 +445,7 @@ const mockTier0Data: Record<string, Tier0DetailData> = {
         unit: 'SET',
         hsCode: '8537.10.00',
         emissionFactorId: 'EF-2026-004',
+        tier1Contract: true,
       },
     ],
     facilityInfo: [
@@ -496,12 +517,38 @@ function parseDataViewTier0CardKey(rawKey: string): {
   };
 }
 
+function tier0NewRowId(): string {
+  return `row-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function parseQtyCell(raw: string | undefined): number {
+  if (raw == null || String(raw).trim() === '') return 0;
+  const n = Number(String(raw).replace(/,/g, '').trim());
+  return Number.isFinite(n) ? n : 0;
+}
+
 export default function Tier0Detail() {
   const { companyId } = useParams();
   const router = useRouter();
   const { mode } = useMode();
   const [activeTab, setActiveTab] = useState(1);
   const [showUploadModal, setShowUploadModal] = useState(false);
+  /** 원청사 엑셀 다운로드: 사업장·담당자·설비·기업기본·사업장담당자·자재·에너지·생산 시트 선택 */
+  const [showExcelDownloadModal, setShowExcelDownloadModal] = useState(false);
+  const [excelDownloadModalTabIds, setExcelDownloadModalTabIds] = useState<number[]>([
+    1, 2, 3, 8, 4, 5, 6, 7,
+  ]);
+  const [excelExporting, setExcelExporting] = useState(false);
+  /** Tier0 엑셀 업로드: 덮어쓰기 | 기존 행 뒤에 추가 */
+  const [tier0UploadMergeMode, setTier0UploadMergeMode] = useState<'overwrite' | 'append'>(
+    'overwrite',
+  );
+  const [tier0ImportBusy, setTier0ImportBusy] = useState(false);
+  const tier0ExcelFileInputRef = useRef<HTMLInputElement>(null);
+  const [eprPickerTarget, setEprPickerTarget] = useState<{
+    kind: 'material' | 'energy';
+    rowIndex: number;
+  } | null>(null);
   const [editableSiteManagers, setEditableSiteManagers] = useState<
     {
       rowId: string;
@@ -569,7 +616,7 @@ export default function Tier0Detail() {
     field: string;
     snapshot: any;
   } | null>(null);
-  
+
   const companyKey = Array.isArray(companyId) ? companyId[0] : companyId;
   const isDataViewTier0Card =
     typeof companyKey === 'string' && parseDataViewTier0CardKey(companyKey) !== null;
@@ -908,6 +955,13 @@ export default function Tier0Detail() {
     { id: 7, name: '생산 정보' },
   ];
 
+  const tier0ExcelSheetTabIds: number[] = [1, 2, 3, 8, 4, 5, 6, 7];
+  const tier0ExcelDownloadOptions = [
+    ...tabs.filter((t) => [1, 2, 3].includes(t.id)),
+    { id: 8, name: '기업 기본정보' },
+    ...tabs.filter((t) => [4, 5, 6, 7].includes(t.id)),
+  ];
+
   // 구매 직무: 전체 탭 잠금
   // ESG 직무: 앞 3개(사업장/담당자/설비) 인터페이스 조회 전용 잠금, 탭 4~7만 수정 가능
   const isTabEditable = (tabId: number) => {
@@ -926,10 +980,11 @@ export default function Tier0Detail() {
     'border border-gray-300 bg-[#F8F9FA] py-4 px-4 text-left align-middle text-sm font-semibold text-[var(--aifix-navy)] min-w-0 overflow-hidden whitespace-normal break-words';
   const SUP_DETAIL_TD =
     'border border-gray-300 py-4 px-4 align-top min-w-0 overflow-hidden whitespace-normal break-words';
+  /** 아이콘 2개만 두므로 고정 폭 — table-fixed에서 남는 폭이 과하게 쌓이지 않게 함 */
   const SUP_DETAIL_TH_ACTION =
-    'border border-gray-300 bg-[#F8F9FA] py-4 px-3 text-right align-middle text-sm font-semibold text-[var(--aifix-navy)] whitespace-nowrap sticky right-0 z-[2] shadow-[-8px_0_16px_-10px_rgba(15,23,42,0.25)]';
+    'border border-gray-300 bg-[#F8F9FA] py-2 px-1.5 w-[5.25rem] min-w-[5.25rem] max-w-[5.25rem] text-center align-middle text-sm font-semibold text-[var(--aifix-navy)] whitespace-nowrap sticky right-0 z-[2] shadow-[-8px_0_16px_-10px_rgba(15,23,42,0.25)]';
   const SUP_DETAIL_TD_ACTION =
-    'border border-gray-300 bg-white py-4 px-3 align-top sticky right-0 z-[1] group-hover:bg-gray-50 shadow-[-8px_0_16px_-10px_rgba(15,23,42,0.2)]';
+    'border border-gray-300 bg-white py-2 px-1.5 w-[5.25rem] min-w-[5.25rem] max-w-[5.25rem] align-top sticky right-0 z-[1] group-hover:bg-gray-50 shadow-[-8px_0_16px_-10px_rgba(15,23,42,0.2)]';
   const SUP_DETAIL_COMBO_TRIGGER =
     'box-border flex h-8 min-h-[32px] w-full min-w-0 max-w-full items-center justify-between gap-1 rounded-md border border-[#E2E8F0] bg-white px-2 text-left text-sm text-[var(--aifix-navy)] outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--aifix-primary)]';
 
@@ -951,7 +1006,25 @@ export default function Tier0Detail() {
     ),
   );
   const mineralOriginOptions = Array.from(new Set((company.siteInfo ?? []).map((s) => s.country).filter(Boolean)));
-  const materialNameBaseOptions = Array.from(new Set((company.materialInfo ?? []).map((m) => m.materialName).filter(Boolean)));
+  /** 투입 자재명 제안: DB `opr_supply_contracts`(데이터뷰) 또는 mock `tier1Contract`; 검색·신규 추가는 동일 */
+  const materialNameTier1ContractOptions = useMemo(() => {
+    if (isDataViewTier0Card && tier0RowFetched) {
+      return [...(tier0RowContext?.tier1_contract_supplied_item_names ?? [])];
+    }
+    return Array.from(
+      new Set(
+        (company.materialInfo ?? [])
+          .filter((m) => m.tier1Contract === true)
+          .map((m) => String(m.materialName ?? '').trim())
+          .filter(Boolean),
+      ),
+    );
+  }, [
+    isDataViewTier0Card,
+    tier0RowFetched,
+    tier0RowContext?.tier1_contract_supplied_item_names,
+    company.materialInfo,
+  ]);
   const unitBaseOptions = ['kg', 'g', 'ton', 'EA', 'm3', 'L'];
   const mineralTypeBaseOptions = ['리튬', '니켈', '코발트', '망간', '흑연'];
   const energyTypeBaseOptions = ['전기', '스팀', 'LNG', '경유', '수소'];
@@ -1282,12 +1355,15 @@ export default function Tier0Detail() {
     );
   }
 
+  /** Tier0 생산량은 제품 납품 단위와 동일하게 EA 고정 */
+  const PRODUCTION_QTY_UNIT = 'EA';
+
   const createEmptyProductionRow = () => ({
     rowId: `new-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     detailProductName: company.productType ?? '',
     siteName: '',
     productionAmount: 0,
-    productionUnit: '',
+    productionUnit: PRODUCTION_QTY_UNIT,
     wasteAmount: 0,
     wasteEmissionFactor: 0,
     wasteEmissionFactorUnit: '',
@@ -1330,8 +1406,93 @@ export default function Tier0Detail() {
     emissionFactorUnit: '',
   });
 
+  const mapFactoryToSiteManagers = (rows: OprTier0WorkplaceContactRowApi[]) => {
+    if (!rows.length) return [createEmptySiteManagerRow()];
+    return rows.map((r) => ({
+      rowId: tier0NewRowId(),
+      siteName: r.site_name ?? '',
+      department: r.department ?? '',
+      position: [r.position, r.job_title].filter((x) => (x ?? '').trim()).join(' / '),
+      name: r.name ?? '',
+      email: r.email ?? '',
+      phone: r.phone ?? '',
+    }));
+  };
+
+  const mapFactoryToMaterials = (rows: OprTier0MaterialRowApi[]) => {
+    if (!rows.length) return [createEmptyMaterialRow()];
+    return rows.map((r) => ({
+      rowId: tier0NewRowId(),
+      detailProductName: r.detail_product_name ?? company.productType ?? '',
+      processName: r.process_name ?? '',
+      inputMaterialName: r.input_material_name ?? '',
+      inputAmount: parseQtyCell(r.input_amount),
+      inputAmountUnit: r.input_amount_unit ?? '',
+      materialEmissionFactor: parseQtyCell(r.material_emission_factor),
+      materialEmissionFactorUnit: r.material_emission_factor_unit ?? '',
+      mineralType: r.mineral_type ?? '',
+      mineralAmount: parseQtyCell(r.mineral_amount),
+      mineralOrigin: r.mineral_origin ?? '',
+      mineralEmissionFactor: parseQtyCell(r.mineral_emission_factor),
+      mineralEmissionFactorUnit: r.mineral_emission_factor_unit ?? '',
+    }));
+  };
+
+  const mapFactoryToEnergy = (rows: OprTier0EnergyRowApi[]) => {
+    if (!rows.length) return [createEmptyEnergyRow()];
+    return rows.map((r) => ({
+      rowId: tier0NewRowId(),
+      detailProductName: r.detail_product_name ?? company.productType ?? '',
+      processName: r.process_name ?? '',
+      energyType: r.energy_type ?? '',
+      energyUsage: parseQtyCell(r.energy_usage),
+      energyUnit: r.energy_unit ?? '',
+      emissionFactor: parseQtyCell(r.energy_emission_factor),
+      emissionFactorUnit: r.energy_emission_factor_unit ?? '',
+    }));
+  };
+
+  const mapFactoryToProduction = (rows: OprTier0ProductionRowApi[]) => {
+    if (!rows.length) return [createEmptyProductionRow()];
+    return rows.map((r) => ({
+      rowId: tier0NewRowId(),
+      detailProductName: r.detail_product_name ?? company.productType ?? '',
+      siteName: r.site_name ?? '',
+      productionAmount: parseQtyCell(r.production_qty),
+      productionUnit: PRODUCTION_QTY_UNIT,
+      wasteAmount: parseQtyCell(r.waste_qty),
+      wasteEmissionFactor: parseQtyCell(r.waste_emission_factor),
+      wasteEmissionFactorUnit: r.waste_emission_factor_unit ?? '',
+    }));
+  };
+
+  const applyTier0ImportPreview = (preview: OprTier0ImportPreviewResponse) => {
+    const sm = mapFactoryToSiteManagers(preview.workplace_contacts ?? []);
+    const mats = mapFactoryToMaterials(preview.materials ?? []);
+    const ene = mapFactoryToEnergy(preview.energy_rows ?? []);
+    const prod = mapFactoryToProduction(preview.production_rows ?? []);
+    if (tier0UploadMergeMode === 'overwrite') {
+      setEditableSiteManagers(sm);
+      setEditableMaterials(mats);
+      setEditableEnergyInfo(ene);
+      setEditableProductionRows(prod);
+    } else {
+      setEditableSiteManagers((prev) => [...prev, ...sm]);
+      setEditableMaterials((prev) => [...prev, ...mats]);
+      setEditableEnergyInfo((prev) => [...prev, ...ene]);
+      setEditableProductionRows((prev) => [...prev, ...prod]);
+    }
+    setSiteManagerEditCell(null);
+    setMaterialEditCell(null);
+    setEnergyEditCell(null);
+    setProductionEditCell(null);
+  };
+
   useEffect(() => {
-    // 요청사항: 더미데이터 제거 + 첫 행은 비어있는 기본행으로 시작
+    const key = typeof companyKey === 'string' ? companyKey : String(companyKey ?? '');
+    if (parseDataViewTier0CardKey(key)) {
+      return;
+    }
     setEditableSiteManagers([createEmptySiteManagerRow()]);
     setEditableEnergyInfo([createEmptyEnergyRow()]);
     setEditableMaterials([createEmptyMaterialRow()]);
@@ -1341,13 +1502,15 @@ export default function Tier0Detail() {
       detailProductName: company.productType ?? '',
       siteName: company.siteInfo?.[0]?.siteName ?? '',
       productionAmount: p.output ?? 0,
-      productionUnit: 'EA',
+      productionUnit: PRODUCTION_QTY_UNIT,
       wasteAmount: p.waste ?? 0,
       wasteEmissionFactor: p.emissionFactor ?? 0,
       wasteEmissionFactorUnit: '',
     }));
+    const productionRows =
+      mappedProduction.length > 0 ? mappedProduction : [createEmptyProductionRow()];
     setEditableProductionRows(
-      mappedProduction.length > 0 ? mappedProduction : [createEmptyProductionRow()],
+      productionRows.map((r) => ({ ...r, productionUnit: PRODUCTION_QTY_UNIT })),
     );
     setProductionEditCell(null);
     setSiteManagerEditCell(null);
@@ -1355,8 +1518,115 @@ export default function Tier0Detail() {
     setEnergyEditCell(null);
   }, [companyKey]);
 
-  const handleExcelDownload = () => {
-    toast.success('Excel 파일을 다운로드합니다');
+  useEffect(() => {
+    const key = typeof companyKey === 'string' ? companyKey : String(companyKey ?? '');
+    const parsed = parseDataViewTier0CardKey(key);
+    if (!parsed) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        if (typeof window !== 'undefined' && !getOprAccessToken()) {
+          await restoreOprSessionFromCookie();
+        }
+        const ym = parsed.yearMonth.split('-');
+        const reportingYear = parseInt(ym[0] ?? '', 10);
+        const reportingMonth = parseInt(ym[1] ?? '', 10);
+        if (!reportingYear || !reportingMonth) return;
+        const data = await getOprTier0FactoryData({
+          custBranchId: parsed.custBranchId,
+          productVariantId: parsed.productVariantId,
+          reportingYear,
+          reportingMonth,
+        });
+        if (cancelled) return;
+        setEditableSiteManagers(mapFactoryToSiteManagers(data.workplace_contacts ?? []));
+        setEditableMaterials(mapFactoryToMaterials(data.materials ?? []));
+        setEditableEnergyInfo(mapFactoryToEnergy(data.energy_rows ?? []));
+        setEditableProductionRows(mapFactoryToProduction(data.production_rows ?? []));
+        setProductionEditCell(null);
+        setSiteManagerEditCell(null);
+        setMaterialEditCell(null);
+        setEnergyEditCell(null);
+      } catch {
+        if (!cancelled) {
+          setEditableSiteManagers([createEmptySiteManagerRow()]);
+          setEditableMaterials([createEmptyMaterialRow()]);
+          setEditableEnergyInfo([createEmptyEnergyRow()]);
+          setEditableProductionRows([createEmptyProductionRow()]);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [companyKey]);
+
+  const openExcelDownloadModal = () => {
+    setExcelDownloadModalTabIds([...tier0ExcelSheetTabIds]);
+    setShowExcelDownloadModal(true);
+  };
+
+  const handleExcelDownloadConfirm = async () => {
+    if (excelDownloadModalTabIds.length === 0) {
+      toast.error('엑셀 다운로드에 포함할 항목을 1개 이상 선택해주세요.');
+      return;
+    }
+    if (!tier0CardParsed) {
+      toast.error(
+        '데이터 관리 조회 화면에서 Tier0 카드를 연 경우에만 DB 기준 엑셀을 받을 수 있습니다.',
+      );
+      return;
+    }
+    const ymParts = tier0CardParsed.yearMonth.split('-');
+    const reportingYear = parseInt(ymParts[0] ?? '', 10);
+    const reportingMonth = parseInt(ymParts[1] ?? '', 10);
+    if (!reportingYear || !reportingMonth) {
+      toast.error('조회 월(YYYY-MM)을 확인할 수 없습니다.');
+      return;
+    }
+    setExcelExporting(true);
+    try {
+      if (typeof window !== 'undefined' && !getOprAccessToken()) {
+        await restoreOprSessionFromCookie();
+      }
+      const blob = await downloadOprTier0ExportXlsx({
+        custBranchId: tier0CardParsed.custBranchId,
+        productVariantId: tier0CardParsed.productVariantId,
+        reportingYear,
+        reportingMonth,
+        sheetTabIds: excelDownloadModalTabIds,
+      });
+      const yyyymm = `${reportingYear}${String(reportingMonth).padStart(2, '0')}`;
+      const sanitizeExcelNamePart = (raw: string) =>
+        String(raw ?? '')
+          .trim()
+          .replace(/[\\/:*?"<>|]/g, '_')
+          .replace(/\s+/g, ' ');
+      const nameTail = [customerLabel, productLabel, detailProductLabel]
+        .map(sanitizeExcelNamePart)
+        .filter((p) => p.length > 0 && p !== '-');
+      let base =
+        nameTail.length > 0
+          ? `${yyyymm} ${nameTail.join(' ')}`
+          : `tier0_pv${tier0CardParsed.productVariantId}_${yyyymm}`;
+      base = base.trimEnd().replace(/[. ]+$/, '');
+      if (base.length > 180) base = `${base.slice(0, 177)}...`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${base}.xlsx`;
+      a.rel = 'noopener';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setShowExcelDownloadModal(false);
+      toast.success('엑셀 파일을 저장했습니다.');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : '다운로드에 실패했습니다.');
+    } finally {
+      setExcelExporting(false);
+    }
   };
 
   const handleExcelUpload = () => {
@@ -1385,8 +1655,112 @@ export default function Tier0Detail() {
     toast.info('새 행을 추가합니다');
   };
 
-  const handleSave = () => {
+  const buildTier0FactorySaveBody = (): OprTier0FactoryDataSaveRequest => ({
+    workplace_contacts: editableSiteManagers.map((r) => ({
+      site_name: r.siteName,
+      department: r.department,
+      position: r.position,
+      job_title: '',
+      name: r.name,
+      email: r.email,
+      phone: r.phone,
+    })),
+    materials: editableMaterials.map((r) => ({
+      detail_product_name: r.detailProductName,
+      process_name: r.processName,
+      input_material_name: r.inputMaterialName,
+      input_amount: String(r.inputAmount ?? ''),
+      input_amount_unit: r.inputAmountUnit,
+      material_emission_factor: String(r.materialEmissionFactor ?? ''),
+      material_emission_factor_unit: r.materialEmissionFactorUnit,
+      mineral_type: r.mineralType,
+      mineral_amount: String(r.mineralAmount ?? ''),
+      mineral_origin: r.mineralOrigin,
+      mineral_emission_factor: String(r.mineralEmissionFactor ?? ''),
+      mineral_emission_factor_unit: r.mineralEmissionFactorUnit,
+    })),
+    energy_rows: editableEnergyInfo.map((r) => ({
+      detail_product_name: r.detailProductName,
+      process_name: r.processName,
+      energy_type: r.energyType,
+      energy_usage: String(r.energyUsage ?? ''),
+      energy_unit: r.energyUnit,
+      energy_emission_factor: String(r.emissionFactor ?? ''),
+      energy_emission_factor_unit: r.emissionFactorUnit,
+    })),
+    production_rows: editableProductionRows.map((r) => ({
+      detail_product_name: r.detailProductName ?? company.productType,
+      site_name: r.siteName,
+      production_qty: String(r.productionAmount ?? ''),
+      production_qty_unit: PRODUCTION_QTY_UNIT,
+      waste_qty: String(r.wasteAmount ?? ''),
+      waste_emission_factor: String(r.wasteEmissionFactor ?? ''),
+      waste_emission_factor_unit: r.wasteEmissionFactorUnit,
+    })),
+  });
+
+  const handleSave = async () => {
+    if (tier0CardParsed) {
+      if (mode !== 'pcf') {
+        toast.info('구매 직무에서는 저장할 수 없습니다. PCF 관점으로 전환하세요.');
+        return;
+      }
+      try {
+        const ymParts = tier0CardParsed.yearMonth.split('-');
+        const reportingYear = parseInt(ymParts[0] ?? '', 10);
+        const reportingMonth = parseInt(ymParts[1] ?? '', 10);
+        if (!reportingYear || !reportingMonth) {
+          toast.error('조회 월(YYYY-MM)을 확인할 수 없습니다.');
+          return;
+        }
+        if (typeof window !== 'undefined' && !getOprAccessToken()) {
+          await restoreOprSessionFromCookie();
+        }
+        const res = await putOprTier0FactoryData({
+          custBranchId: tier0CardParsed.custBranchId,
+          productVariantId: tier0CardParsed.productVariantId,
+          reportingYear,
+          reportingMonth,
+          team: 'pcf',
+          body: buildTier0FactorySaveBody(),
+        });
+        if (res.warnings?.length) {
+          toast.message(res.warnings.join('\n'), { duration: 8000 });
+        }
+        toast.success(res.message ?? '저장되었습니다.');
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : '저장에 실패했습니다.');
+      }
+      return;
+    }
     toast.success('저장되었습니다');
+  };
+
+  const handleTier0ExcelUploadConfirm = async () => {
+    const input = tier0ExcelFileInputRef.current;
+    const file = input?.files?.[0];
+    if (!file) {
+      toast.error('Excel 파일을 선택하세요.');
+      return;
+    }
+    setTier0ImportBusy(true);
+    try {
+      if (typeof window !== 'undefined' && !getOprAccessToken()) {
+        await restoreOprSessionFromCookie();
+      }
+      const preview = await postOprTier0ImportPreview(file);
+      if (preview.warnings?.length) {
+        toast.message(preview.warnings.join('\n'), { duration: 6000 });
+      }
+      applyTier0ImportPreview(preview);
+      toast.success('엑셀 내용을 화면에 반영했습니다. 확인 후 수정 완료를 누르면 DB에 저장됩니다.');
+      setShowUploadModal(false);
+      if (input) input.value = '';
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : '엑셀 미리보기에 실패했습니다.');
+    } finally {
+      setTier0ImportBusy(false);
+    }
   };
 
   const handleInsertProductionRowAfter = (rowIndex: number) => {
@@ -1928,7 +2302,7 @@ export default function Tier0Detail() {
                                 prev.map((r, i) => (i === idx ? { ...r, inputMaterialName: v } : r)),
                               )
                             }
-                            baseOptions={materialNameBaseOptions}
+                            baseOptions={materialNameTier1ContractOptions}
                             placeholder="투입 자재명 검색·추가"
                           />
                         ) : safeValue(row.inputMaterialName)}
@@ -1948,7 +2322,27 @@ export default function Tier0Detail() {
                           />
                         ) : safeValue(row.inputAmountUnit)}
                       </td>
-                      <td className={SUP_DETAIL_TD}>{renderMaterialValueContent(idx, 'materialEmissionFactor', row.materialEmissionFactor)}</td>
+                      <td className={SUP_DETAIL_TD}>
+                        <div className="flex min-w-0 items-center gap-1">
+                          <div className="min-w-0 flex-1">
+                            {renderMaterialValueContent(
+                              idx,
+                              'materialEmissionFactor',
+                              row.materialEmissionFactor,
+                            )}
+                          </div>
+                          {isTabEditable(5) && (
+                            <button
+                              type="button"
+                              title="환경성적표지 참조 계수에서 선택"
+                              className="shrink-0 rounded-md p-1 text-[#5B3BFA] hover:bg-violet-50"
+                              onClick={() => setEprPickerTarget({ kind: 'material', rowIndex: idx })}
+                            >
+                              <TableProperties className="h-4 w-4" />
+                            </button>
+                          )}
+                        </div>
+                      </td>
                       <td className={SUP_DETAIL_TD}>
                         {isTabEditable(5) ? (
                           <SearchableSelectCreatable
@@ -2009,11 +2403,11 @@ export default function Tier0Detail() {
                       </td>
                       {isTabEditable(5) && (
                         <td className={SUP_DETAIL_TD_ACTION}>
-                          <div className="flex h-8 items-center justify-end gap-0.5">
+                          <div className="flex h-8 items-center justify-center gap-0">
                             <button
                               type="button"
                               onClick={() => handleInsertMaterialRowAfter(idx)}
-                              className="inline-flex items-center justify-center rounded-lg p-2 text-gray-500 hover:bg-gray-100 transition-colors"
+                              className="inline-flex size-8 shrink-0 items-center justify-center rounded-md p-0 text-gray-500 hover:bg-gray-100 transition-colors"
                               title="이 행 아래에 새 행 추가"
                               aria-label="이 행 아래에 새 행 추가"
                             >
@@ -2022,7 +2416,7 @@ export default function Tier0Detail() {
                             <button
                               type="button"
                               onClick={() => handleRemoveMaterialRowAt(idx)}
-                              className="inline-flex items-center justify-center rounded-lg p-2 text-gray-500 hover:bg-red-50 hover:text-red-600 transition-colors"
+                              className="inline-flex size-8 shrink-0 items-center justify-center rounded-md p-0 text-gray-500 hover:bg-red-50 hover:text-red-600 transition-colors"
                               title="이 행 삭제"
                               aria-label="이 행 삭제"
                             >
@@ -2180,11 +2574,11 @@ export default function Tier0Detail() {
                       <td className={`${SUP_DETAIL_TD} min-w-[180px] whitespace-normal break-words`}>{renderSiteManagerValueContent(idx, 'phone', row.phone)}</td>
                       {isTabEditable(4) && (
                         <td className={SUP_DETAIL_TD_ACTION}>
-                          <div className="flex h-8 items-center justify-end gap-0.5">
+                          <div className="flex h-8 items-center justify-center gap-0">
                             <button
                               type="button"
                               onClick={() => handleInsertSiteManagerRowAfter(idx)}
-                              className="inline-flex items-center justify-center rounded-lg p-2 text-gray-500 hover:bg-gray-100 transition-colors"
+                              className="inline-flex size-8 shrink-0 items-center justify-center rounded-md p-0 text-gray-500 hover:bg-gray-100 transition-colors"
                               title="이 행 아래에 새 행 추가"
                               aria-label="이 행 아래에 새 행 추가"
                             >
@@ -2193,7 +2587,7 @@ export default function Tier0Detail() {
                             <button
                               type="button"
                               onClick={() => handleRemoveSiteManagerRowAt(idx)}
-                              className="inline-flex items-center justify-center rounded-lg p-2 text-gray-500 hover:bg-red-50 hover:text-red-600 transition-colors"
+                              className="inline-flex size-8 shrink-0 items-center justify-center rounded-md p-0 text-gray-500 hover:bg-red-50 hover:text-red-600 transition-colors"
                               title="이 행 삭제"
                               aria-label="이 행 삭제"
                             >
@@ -2321,7 +2715,23 @@ export default function Tier0Detail() {
                           />
                         ) : safeValue(row.energyUnit)}
                       </td>
-                      <td className={SUP_DETAIL_TD}>{renderEnergyValueContent(idx, 'emissionFactor', row.emissionFactor)}</td>
+                      <td className={SUP_DETAIL_TD}>
+                        <div className="flex min-w-0 items-center gap-1">
+                          <div className="min-w-0 flex-1">
+                            {renderEnergyValueContent(idx, 'emissionFactor', row.emissionFactor)}
+                          </div>
+                          {isTabEditable(6) && (
+                            <button
+                              type="button"
+                              title="환경성적표지 참조 계수에서 선택"
+                              className="shrink-0 rounded-md p-1 text-[#5B3BFA] hover:bg-violet-50"
+                              onClick={() => setEprPickerTarget({ kind: 'energy', rowIndex: idx })}
+                            >
+                              <TableProperties className="h-4 w-4" />
+                            </button>
+                          )}
+                        </div>
+                      </td>
                       <td className={SUP_DETAIL_TD}>
                         {isTabEditable(6) ? (
                           <SearchableSelectCreatable
@@ -2338,11 +2748,11 @@ export default function Tier0Detail() {
                       </td>
                       {isTabEditable(6) && (
                         <td className={SUP_DETAIL_TD_ACTION}>
-                          <div className="flex h-8 items-center justify-end gap-0.5">
+                          <div className="flex h-8 items-center justify-center gap-0">
                             <button
                               type="button"
                               onClick={() => handleInsertEnergyRowAfter(idx)}
-                              className="inline-flex items-center justify-center rounded-lg p-2 text-gray-500 hover:bg-gray-100 transition-colors"
+                              className="inline-flex size-8 shrink-0 items-center justify-center rounded-md p-0 text-gray-500 hover:bg-gray-100 transition-colors"
                               title="이 행 아래에 새 행 추가"
                               aria-label="이 행 아래에 새 행 추가"
                             >
@@ -2351,7 +2761,7 @@ export default function Tier0Detail() {
                             <button
                               type="button"
                               onClick={() => handleRemoveEnergyRowAt(idx)}
-                              className="inline-flex items-center justify-center rounded-lg p-2 text-gray-500 hover:bg-red-50 hover:text-red-600 transition-colors"
+                              className="inline-flex size-8 shrink-0 items-center justify-center rounded-md p-0 text-gray-500 hover:bg-red-50 hover:text-red-600 transition-colors"
                               title="이 행 삭제"
                               aria-label="이 행 삭제"
                             >
@@ -2457,17 +2867,38 @@ export default function Tier0Detail() {
                             )}
                           </td>
                           <td className={SUP_DETAIL_TD}>{renderProductionValueContent(idx, 'productionAmount', row.productionAmount)}</td>
-                          <td className={SUP_DETAIL_TD}>{renderProductionValueContent(idx, 'productionUnit', row.productionUnit)}</td>
+                          <td className={SUP_DETAIL_TD}>
+                            <div className={cellShellClass} style={{ color: 'var(--aifix-navy)' }}>
+                              <span className="min-w-0 flex-1 truncate text-gray-700">{PRODUCTION_QTY_UNIT}</span>
+                            </div>
+                          </td>
                           <td className={SUP_DETAIL_TD}>{renderProductionValueContent(idx, 'wasteAmount', row.wasteAmount)}</td>
                           <td className={SUP_DETAIL_TD}>{renderProductionValueContent(idx, 'wasteEmissionFactor', row.wasteEmissionFactor)}</td>
-                          <td className={SUP_DETAIL_TD}>{renderProductionValueContent(idx, 'wasteEmissionFactorUnit', row.wasteEmissionFactorUnit)}</td>
+                          <td className={SUP_DETAIL_TD}>
+                            {isTabEditable(7) ? (
+                              <SearchableSelectCreatable
+                                value={row.wasteEmissionFactorUnit}
+                                onChange={(v) =>
+                                  setEditableProductionRows((prev) =>
+                                    prev.map((r, i) =>
+                                      i === idx ? { ...r, wasteEmissionFactorUnit: v } : r,
+                                    ),
+                                  )
+                                }
+                                baseOptions={materialEfUnitBaseOptions}
+                                placeholder="폐기물 배출계수 단위 검색·추가"
+                              />
+                            ) : (
+                              safeValue(row.wasteEmissionFactorUnit)
+                            )}
+                          </td>
                           {isTabEditable(7) && (
                             <td className={SUP_DETAIL_TD_ACTION}>
-                              <div className="flex h-8 items-center justify-end gap-0.5">
+                              <div className="flex h-8 items-center justify-center gap-0">
                                 <button
                                   type="button"
                                   onClick={() => handleInsertProductionRowAfter(idx)}
-                                  className="inline-flex items-center justify-center rounded-lg p-2 text-gray-500 hover:bg-gray-100 transition-colors"
+                                  className="inline-flex size-8 shrink-0 items-center justify-center rounded-md p-0 text-gray-500 hover:bg-gray-100 transition-colors"
                                   title="이 행 아래에 새 행 추가"
                                   aria-label="이 행 아래에 새 행 추가"
                                 >
@@ -2476,7 +2907,7 @@ export default function Tier0Detail() {
                                 <button
                                   type="button"
                                   onClick={() => handleRemoveProductionRowAt(idx)}
-                                  className="inline-flex items-center justify-center rounded-lg p-2 text-gray-500 hover:bg-red-50 hover:text-red-600 transition-colors"
+                                  className="inline-flex size-8 shrink-0 items-center justify-center rounded-md p-0 text-gray-500 hover:bg-red-50 hover:text-red-600 transition-colors"
                                   title="이 행 삭제"
                                   aria-label="이 행 삭제"
                                 >
@@ -2699,7 +3130,8 @@ export default function Tier0Detail() {
           </div>
           <div className="flex items-center gap-3">
             <button
-              onClick={handleExcelDownload}
+              type="button"
+              onClick={openExcelDownloadModal}
               className="px-5 py-2.5 text-white rounded-lg flex items-center gap-2 font-medium transition-all hover:scale-105"
               style={{
                 background: 'linear-gradient(90deg, #5B3BFA 0%, #00B4FF 100%)',
@@ -2763,7 +3195,105 @@ export default function Tier0Detail() {
         ))}
       </datalist>
 
-      {/* Excel Upload Modal */}
+      {/* 엑셀 다운로드 — 사업장 담당자·자재·에너지·생산 시트 선택 */}
+      {showExcelDownloadModal && (
+        <div
+          className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4"
+          onClick={() => setShowExcelDownloadModal(false)}
+        >
+          <div
+            className="bg-white rounded-[20px] w-full max-w-[900px] overflow-hidden shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-6 border-b border-gray-200 flex items-center justify-between">
+              <h3 className="text-2xl font-bold text-gray-900">엑셀 다운로드</h3>
+              <button
+                type="button"
+                onClick={() => setShowExcelDownloadModal(false)}
+                className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+                aria-label="닫기"
+              >
+                <X className="w-6 h-6 text-gray-500" />
+              </button>
+            </div>
+
+            <div className="p-6">
+              <p className="mb-4 text-sm text-gray-600">
+                다운로드할 세부탭을 선택하면, 선택한 탭별로 시트가 생성됩니다. (컬럼 포맷은 동일하게
+                유지됩니다)
+              </p>
+
+              <div className="flex items-center justify-end gap-2 mb-4">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setExcelDownloadModalTabIds(tier0ExcelDownloadOptions.map((t) => t.id))
+                  }
+                  className="px-4 py-2 rounded-lg border border-gray-300 text-gray-800 bg-white font-semibold text-sm hover:bg-gray-50"
+                >
+                  전체선택
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setExcelDownloadModalTabIds([])}
+                  className="px-4 py-2 rounded-lg border border-gray-300 text-gray-800 bg-white font-semibold text-sm hover:bg-gray-50"
+                >
+                  전체해지
+                </button>
+              </div>
+
+              <div className="flex flex-wrap gap-4">
+                {tier0ExcelDownloadOptions.map((t) => (
+                  <label
+                    key={t.id}
+                    className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={excelDownloadModalTabIds.includes(t.id)}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setExcelDownloadModalTabIds((prev) => {
+                          if (checked) return Array.from(new Set([...prev, t.id]));
+                          return prev.filter((id) => id !== t.id);
+                        });
+                      }}
+                      className="w-4 h-4 rounded border-gray-300"
+                      style={{ accentColor: '#5B3BFA' }}
+                    />
+                    <span className="text-gray-900 font-semibold">{t.name}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div className="p-6 border-t border-gray-200 flex justify-end gap-3">
+              <button
+                type="button"
+                disabled={excelExporting}
+                onClick={() => setShowExcelDownloadModal(false)}
+                className="px-6 py-3 rounded-xl border border-gray-300 text-gray-900 bg-white font-semibold hover:bg-gray-50 disabled:opacity-50"
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                disabled={excelExporting}
+                onClick={() => void handleExcelDownloadConfirm()}
+                className="flex items-center gap-2 px-6 py-3 rounded-xl text-white font-semibold transition-opacity hover:opacity-90 disabled:opacity-50"
+                style={{
+                  background: 'linear-gradient(90deg, #5B3BFA 0%, #00B4FF 100%)',
+                }}
+              >
+                <Download className="w-5 h-5" />
+                {excelExporting ? '다운로드 중…' : '엑셀로 다운받기'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Excel Upload Modal — 다운로드와 동일 포맷 → 미리보기(API) → 화면 반영 → 수정 완료 시 DB */}
       {showUploadModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4">
           <div
@@ -2774,47 +3304,105 @@ export default function Tier0Detail() {
           >
             <div className="p-6 border-b border-gray-200">
               <h2 className="text-xl font-bold text-gray-900">공정 실적 Excel 업로드</h2>
+              <p className="mt-2 text-sm text-gray-500">
+                사업장 정보·담당자 정보·설비 정보 시트는 업로드해도 읽지 않으며, 해당 탭 화면은 바뀌지
+                않습니다. 사업장 담당자·자재·에너지·생산 시트만 읽어 화면에 반영합니다. DB 반영은 확인 후
+                「수정 완료」를 누르세요.
+              </p>
             </div>
             <div className="p-6">
-              <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-[#5B3BFA] transition-colors cursor-pointer">
+              <input
+                ref={tier0ExcelFileInputRef}
+                type="file"
+                accept=".xlsx,.xlsm,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                className="sr-only"
+                aria-hidden
+              />
+              <button
+                type="button"
+                onClick={() => tier0ExcelFileInputRef.current?.click()}
+                className="w-full border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-[#5B3BFA] transition-colors cursor-pointer"
+              >
                 <Upload className="w-12 h-12 mx-auto mb-4 text-gray-400" />
                 <p className="text-gray-700 font-medium mb-2">파일을 드래그하거나 클릭하여 선택</p>
-                <p className="text-sm text-gray-500">Excel 파일만 업로드 가능합니다</p>
-              </div>
+                <p className="text-sm text-gray-500">xlsx 파일 (다운로드한 tier0/export와 동일 구조)</p>
+              </button>
               <div className="mt-6 space-y-3">
-                <label className="flex items-center gap-2">
-                  <input type="radio" name="uploadMode" defaultChecked className="text-[#5B3BFA]" />
-                  <span className="text-sm">기존 데이터 덮어쓰기</span>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="tier0UploadMode"
+                    checked={tier0UploadMergeMode === 'overwrite'}
+                    onChange={() => setTier0UploadMergeMode('overwrite')}
+                    className="text-[#5B3BFA]"
+                  />
+                  <span className="text-sm">기존 화면 데이터 덮어쓰기</span>
                 </label>
-                <label className="flex items-center gap-2">
-                  <input type="radio" name="uploadMode" className="text-[#5B3BFA]" />
-                  <span className="text-sm">기존 데이터 유지 + 추가</span>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="tier0UploadMode"
+                    checked={tier0UploadMergeMode === 'append'}
+                    onChange={() => setTier0UploadMergeMode('append')}
+                    className="text-[#5B3BFA]"
+                  />
+                  <span className="text-sm">기존 화면 데이터 유지 + 엑셀 행 추가</span>
                 </label>
               </div>
             </div>
             <div className="p-6 border-t border-gray-200 flex items-center justify-end gap-3">
               <button
-                onClick={() => setShowUploadModal(false)}
+                type="button"
+                onClick={() => {
+                  setShowUploadModal(false);
+                  if (tier0ExcelFileInputRef.current) tier0ExcelFileInputRef.current.value = '';
+                }}
                 className="px-5 py-2.5 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
               >
                 취소
               </button>
               <button
-                onClick={() => {
-                  toast.success('Excel 파일을 업로드합니다');
-                  setShowUploadModal(false);
-                }}
-                className="px-5 py-2.5 text-white rounded-lg"
+                type="button"
+                disabled={tier0ImportBusy}
+                onClick={() => void handleTier0ExcelUploadConfirm()}
+                className="px-5 py-2.5 text-white rounded-lg disabled:opacity-50"
                 style={{
                   background: 'linear-gradient(90deg, #5B3BFA 0%, #00B4FF 100%)',
                 }}
               >
-                업로드
+                {tier0ImportBusy ? '처리 중…' : '미리보기 반영'}
               </button>
             </div>
           </div>
         </div>
       )}
+
+      <EprCo2eFactorPickerModal
+        open={eprPickerTarget !== null}
+        onClose={() => setEprPickerTarget(null)}
+        onApply={({ co2eFactor, factorUnit, label }) => {
+          const t = eprPickerTarget;
+          if (!t) return;
+          if (t.kind === 'material') {
+            setEditableMaterials((prev) =>
+              prev.map((r, i) =>
+                i === t.rowIndex
+                  ? { ...r, materialEmissionFactor: co2eFactor, materialEmissionFactorUnit: factorUnit }
+                  : r,
+              ),
+            );
+          } else {
+            setEditableEnergyInfo((prev) =>
+              prev.map((r, i) =>
+                i === t.rowIndex ? { ...r, emissionFactor: co2eFactor, emissionFactorUnit: factorUnit } : r,
+              ),
+            );
+          }
+          setMaterialEditCell(null);
+          setEnergyEditCell(null);
+          toast.success(`배출계수 반영: ${label}`);
+        }}
+      />
     </div>
   );
 }

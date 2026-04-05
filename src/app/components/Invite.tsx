@@ -7,11 +7,13 @@ import {
   FileText,
   Eye,
   Send,
+  Loader2,
   CheckCircle,
   Clock,
   AlertCircle,
   Check,
   XCircle,
+  Ban,
   ShieldAlert,
   Building2,
   User,
@@ -19,10 +21,32 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useMode } from '../context/ModeContext';
-import { getInvitationHistory, postOprInvitation, type InvitationHistoryItem } from '@/lib/api/invitation';
-import { startOprGoogleLinkFlow } from '@/lib/api/oprGoogleLink';
-import { apiFetch } from '@/lib/api/client';
+import {
+  getInvitationAttachmentDataContractRevision,
+  getInvitationHistory,
+  postOprInvitation,
+  postRevokeInvitation,
+  type InvitationHistoryItem,
+  type OprInvitePayload,
+} from '@/lib/api/invitation';
+import {
+  OPR_PENDING_INVITE_SEND_STORAGE_KEY,
+  startOprGoogleLinkFlow,
+} from '@/lib/api/oprGoogleLink';
+import { actorStorageKey, apiFetch } from '@/lib/api/client';
+import {
+  displayVersionCode,
+  fetchContractRevisionPdfBlob,
+  type ContractRevisionCurrentResponse,
+} from '@/lib/api/data-contract';
 import { approveSignupRequest, rejectSignupRequest } from '@/lib/api/iam';
+
+/** 로컬@도메인.TLD(2자 이상) 수준의 단순 이메일 형식 검사 */
+function isPlausibleInviteEmail(raw: string): boolean {
+  const s = raw.trim();
+  if (!s) return false;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(s);
+}
 
 type Recipient = { company: string; email: string; contactName: string; scopeId?: string };
 type Tier1Supplier = {
@@ -33,12 +57,74 @@ type Tier1Supplier = {
   projectId?: number;
   productId?: number;
   productVariantId?: number;
+  /** 노드에 연결된 초대(inv_invitations.id). 승인 완료 여부는 이력 status 로 판별 */
+  invitationId?: number | null;
 };
 
-/** 1차 협력사 선택: 협력사명(코드) + 등록완료만 표시 (내부 id는 프로젝트·세부제품 스코프 유지) */
-function formatOprTier1OptionLabel(s: Tier1Supplier): string {
-  const tag = s.nameEn?.trim() ? s.nameEn.trim() : '공급망 등록';
-  return `${s.name} (${tag}) 등록완료`;
+type SentHistoryRow = {
+  invitationId: number;
+  /** API `inv_invitations.status` (sent, in_progress, revoked, …) */
+  inviteStatus: string;
+  company: string;
+  email: string;
+  sentDate: string;
+  version: string;
+  status: string;
+  opened: boolean;
+  projectAccess: string;
+  signupRequestId?: number;
+};
+
+function buildInvitationHistoryState(
+  rows: InvitationHistoryItem[],
+  contractVersionLabel: string,
+): {
+  invitationStatusById: Record<number, string>;
+  sentHistory: SentHistoryRow[];
+} {
+  const invitationStatusById: Record<number, string> = {};
+  for (const r of rows) {
+    invitationStatusById[r.id] = r.status;
+  }
+  const sentHistory = rows.map((r: InvitationHistoryItem) => {
+    const pendingId = r.pending_signup_request_id;
+    const hasPendingSignup =
+      pendingId != null && pendingId > 0;
+    let projectAccess: SentHistoryRow['projectAccess'];
+    if (r.status === 'completed') projectAccess = 'approved';
+    else if (r.status === 'revoked') projectAccess = 'invite_revoked';
+    else if (hasPendingSignup) projectAccess = 'pending';
+    else if (r.status === 'in_progress') projectAccess = 'awaiting_signup';
+    else projectAccess = 'waiting';
+
+    return {
+      invitationId: r.id,
+      inviteStatus: r.status,
+      company: r.invitee_company_hint || '-',
+      email: r.invitee_email || '-',
+      sentDate: new Date(r.created_at).toLocaleString(),
+      version: contractVersionLabel,
+      status: r.status === 'failed' ? 'failed' : 'sent',
+      opened: r.status === 'in_progress' || r.status === 'completed',
+      projectAccess,
+      signupRequestId: hasPendingSignup ? pendingId : undefined,
+    };
+  });
+  return { invitationStatusById, sentHistory };
+}
+
+/** 등록완료: 공급망 1차만. 초대완료: 해당 초대가 inv.status === completed(승인까지) */
+function formatOprTier1OptionLabel(
+  s: Tier1Supplier,
+  invitationStatusById: Record<number, string>,
+): string {
+  const tag = s.nameEn?.trim() ? s.nameEn.trim() : '코드없음';
+  const base = `${s.name} (${tag})`;
+  const invId = s.invitationId;
+  if (invId != null && invitationStatusById[invId] === 'completed') {
+    return `${base} (초대완료)`;
+  }
+  return `${base} (등록완료)`;
 }
 
 type RecipientCardProps = {
@@ -49,6 +135,7 @@ type RecipientCardProps = {
   eligibleTier1Suppliers: Array<Tier1Supplier>;
   supplierEmailById: Record<string, string>;
   suppliersLoading: boolean;
+  invitationStatusById: Record<number, string>;
 };
 
 function RecipientCard({
@@ -59,8 +146,11 @@ function RecipientCard({
   eligibleTier1Suppliers,
   supplierEmailById,
   suppliersLoading,
+  invitationStatusById,
 }: RecipientCardProps) {
   const selectDisabled = suppliersLoading || eligibleTier1Suppliers.length === 0;
+  const emailHasInput = recipient.email.trim().length > 0;
+  const emailInvalid = emailHasInput && !isPlausibleInviteEmail(recipient.email);
 
   return (
     <div className="p-4 rounded-xl border border-gray-200 bg-white">
@@ -113,7 +203,7 @@ function RecipientCard({
               </option>
               {eligibleTier1Suppliers.map((s) => (
                 <option key={s.id} value={s.id}>
-                  {formatOprTier1OptionLabel(s)}
+                  {formatOprTier1OptionLabel(s, invitationStatusById)}
                 </option>
               ))}
             </select>
@@ -141,7 +231,9 @@ function RecipientCard({
           <label className="block text-sm font-semibold text-gray-900 mb-2">담당자 이메일 *</label>
           <div className="relative">
             <Mail
-              className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400"
+              className={`pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 ${
+                emailInvalid ? 'text-red-400' : 'text-gray-400'
+              }`}
               aria-hidden
             />
             <input
@@ -149,9 +241,19 @@ function RecipientCard({
               value={recipient.email}
               onChange={(e) => onChange({ ...recipient, email: e.target.value })}
               placeholder="예: contact@company.com"
-              className="w-full rounded-lg border border-gray-300 py-2.5 pl-10 pr-3 text-sm transition-all focus:border-purple-600 focus:outline-none focus:ring-1 focus:ring-purple-500"
+              aria-invalid={emailInvalid}
+              className={`w-full rounded-lg border py-2.5 pl-10 pr-3 text-sm transition-all focus:outline-none focus:ring-1 ${
+                emailInvalid
+                  ? 'border-red-500 focus:border-red-600 focus:ring-red-500'
+                  : 'border-gray-300 focus:border-purple-600 focus:ring-purple-500'
+              }`}
             />
           </div>
+          {emailInvalid ? (
+            <p className="mt-1.5 text-xs text-red-600" role="alert">
+              올바른 이메일 형식을 입력해 주세요. (예: name@company.com)
+            </p>
+          ) : null}
         </div>
       </div>
     </div>
@@ -182,43 +284,47 @@ https://aifix.com/signup
 회원가입 시 제3자 제공 동의서에 대한 동의가 필요하며, 첨부된 문서를 확인해 주시기 바랍니다.
 
 감사합니다.`);
-  const [selectedVersion, setSelectedVersion] = useState('v2.0 (2026.01)');
+  /** 초대 메일 첨부와 동일: is_current·active 개정 (서버 기준) */
+  const [attachmentRevision, setAttachmentRevision] = useState<ContractRevisionCurrentResponse | null>(
+    null,
+  );
+  const [attachmentRevisionLoading, setAttachmentRevisionLoading] = useState(true);
 
-  const contractVersions = [
-    { value: 'v1.0 (2025.02)', label: 'v1.0 (2025.02)' },
-    { value: 'v1.1 (2025.05)', label: 'v1.1 (2025.05)' },
-    { value: 'v2.0 (2026.01)', label: 'v2.0 (2026.01)' },
-  ];
+  const [invitationStatusById, setInvitationStatusById] = useState<Record<number, string>>({});
 
-  const [sentHistory, setSentHistory] = useState<Array<{
-    company: string;
-    email: string;
-    sentDate: string;
-    version: string;
-    status: string;
-    opened: boolean;
-    projectAccess: string;
-    signupRequestId?: number;
-  }>>([
-    { company: '(주)테크노소재', email: 'contact@techno.com', sentDate: '2026.02.28 14:30', version: 'v2.0', status: 'opened', opened: true, projectAccess: 'approved' },
-    { company: '글로벌파트너스', email: 'info@global.com', sentDate: '2026.02.27 11:20', version: 'v2.0', status: 'sent', opened: false, projectAccess: 'pending' },
-    { company: '신소재산업(주)', email: 'admin@newmat.com', sentDate: '2026.02.26 16:45', version: 'v2.0', status: 'opened', opened: true, projectAccess: 'pending' },
-    { company: '한국부품제조', email: 'parts@korea.com', sentDate: '2026.02.25 09:15', version: 'v1.1', status: 'sent', opened: false, projectAccess: 'pending' },
-    { company: '아시아컴포넌트', email: 'contact@asia.com', sentDate: '2026.02.24 13:00', version: 'v2.0', status: 'opened', opened: true, projectAccess: 'approved' },
-    { company: '(주)녹색소재', email: 'green@eco.com', sentDate: '2026.02.23 10:30', version: 'v2.0', status: 'failed', opened: false, projectAccess: 'rejected' },
-  ]);
+  const [sentHistory, setSentHistory] = useState<SentHistoryRow[]>([]);
 
   const csvInputRef = useRef<HTMLInputElement | null>(null);
+  const reloadTier1Ref = useRef<() => Promise<void>>(async () => {});
+  const inviteResumeInFlightRef = useRef(false);
+  const [attachmentPreviewLoading, setAttachmentPreviewLoading] = useState(false);
+  const [sendInvitesLoading, setSendInvitesLoading] = useState(false);
+  const [revokingInvitationId, setRevokingInvitationId] = useState<number | null>(null);
+
+  const inviteContractVersionLabel = attachmentRevision
+    ? displayVersionCode(attachmentRevision.version_code)
+    : '—';
+
+  /** 백엔드 첨부 파일명과 동일: `{version_code}_contract.pdf` */
+  const inviteAttachmentFileName = attachmentRevision
+    ? `${attachmentRevision.version_code}_contract.pdf`
+    : null;
+
+  /** 히스토리 최초 로드 시점에는 개정 라벨이 아직 없을 수 있어, 로드 후 버전 뱃지만 보강 */
+  useEffect(() => {
+    const label = attachmentRevision
+      ? displayVersionCode(attachmentRevision.version_code)
+      : '—';
+    setSentHistory((prev) =>
+      prev.length === 0 ? prev : prev.map((row) => ({ ...row, version: label })),
+    );
+  }, [attachmentRevision]);
 
   useEffect(() => {
     let mounted = true;
-    let loadAttempted = false;
-    
+
     // DB에서 등록된 1차 협력사 목록 가져오기 (병렬 최적화)
     const loadTier1Suppliers = async () => {
-      if (loadAttempted) return;
-      loadAttempted = true;
-      
       setLoadingSuppliers(true);
       try {
         const customers = await apiFetch<any[]>('/api/supply-chain/project-supply-chain/customers');
@@ -311,6 +417,10 @@ https://aifix.com/signup
             projectId: item.project.id,
             productId: item.product.id,
             productVariantId: item.variant.id,
+            invitationId:
+              node.invitation_id != null && node.invitation_id !== undefined
+                ? Number(node.invitation_id)
+                : null,
           });
         }
 
@@ -329,47 +439,147 @@ https://aifix.com/signup
       }
     };
 
+    reloadTier1Ref.current = loadTier1Suppliers;
+
+    /** 초대 API는 X-Actor-User-Id 필수 — 세션 복원 전에 호출하면 401. 히스토리·1차목록과 동일 타이밍에 호출 */
+    const loadAttachmentRevision = async () => {
+      if (typeof window !== 'undefined') {
+        const actor = localStorage.getItem(actorStorageKey());
+        if (!actor?.trim()) {
+          if (mounted) {
+            setAttachmentRevision(null);
+            setAttachmentRevisionLoading(false);
+          }
+          return;
+        }
+      }
+      if (!mounted) return;
+      setAttachmentRevisionLoading(true);
+      try {
+        const r = await getInvitationAttachmentDataContractRevision();
+        if (mounted) setAttachmentRevision(r);
+      } catch {
+        if (mounted) setAttachmentRevision(null);
+      } finally {
+        if (mounted) setAttachmentRevisionLoading(false);
+      }
+    };
+
     const loadHistory = async () => {
       try {
         const rows = await getInvitationHistory({ limit: 50 });
         console.log('초대 히스토리 API 응답:', rows);
-        const mapped = rows.map((r: InvitationHistoryItem) => ({
-          company: r.invitee_company_hint || '-',
-          email: r.invitee_email || '-',
-          sentDate: new Date(r.created_at).toLocaleString(),
-          version: 'v2.0',
-          status: r.status === 'failed' ? 'failed' : 'sent',
-          opened: r.status === 'in_progress' || r.status === 'completed',
-          projectAccess:
-            r.status === 'completed'
-              ? 'approved'
-              : r.status === 'revoked'
-                ? 'rejected'
-                : r.status === 'in_progress'
-                  ? 'pending'
-                  : 'waiting',
-          signupRequestId: r.last_signup_request_id ?? undefined,
-        }));
+        const { invitationStatusById: statusMap, sentHistory: mapped } = buildInvitationHistoryState(
+          rows,
+          '—',
+        );
         console.log('매핑된 히스토리:', mapped);
         if (mounted) {
+          setInvitationStatusById(statusMap);
           setSentHistory(mapped);
         }
       } catch (error) {
         console.error('초대 히스토리 조회 실패:', error);
       }
     };
-    
+
+    /** Gmail 연동 직전 저장된 초대 페이로드 — 연동 복귀 후 자동 발송 */
+    const resumePendingInviteSends = async () => {
+      if (!mounted) return;
+      if (inviteResumeInFlightRef.current) return;
+      if (typeof window === 'undefined') return;
+      const raw = sessionStorage.getItem(OPR_PENDING_INVITE_SEND_STORAGE_KEY);
+      if (!raw?.trim()) return;
+      let payloads: OprInvitePayload[];
+      try {
+        const parsed = JSON.parse(raw) as unknown;
+        if (!Array.isArray(parsed) || parsed.length === 0) {
+          sessionStorage.removeItem(OPR_PENDING_INVITE_SEND_STORAGE_KEY);
+          return;
+        }
+        payloads = parsed as OprInvitePayload[];
+      } catch {
+        sessionStorage.removeItem(OPR_PENDING_INVITE_SEND_STORAGE_KEY);
+        return;
+      }
+      if (!localStorage.getItem(actorStorageKey())?.trim()) return;
+
+      inviteResumeInFlightRef.current = true;
+      setSendInvitesLoading(true);
+      try {
+        let success = 0;
+        const failMessages: string[] = [];
+        for (let i = 0; i < payloads.length; i++) {
+          try {
+            await postOprInvitation(payloads[i]);
+            success += 1;
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : '발송 실패';
+            if (msg.includes('428') || msg.toLowerCase().includes('gmail')) {
+              sessionStorage.setItem(
+                OPR_PENDING_INVITE_SEND_STORAGE_KEY,
+                JSON.stringify(payloads.slice(i)),
+              );
+              toast.message(
+                '초대 메일은 연동된 Google 계정(Gmail)으로 발송됩니다. Google 연동 화면으로 이동합니다.',
+              );
+              try {
+                await startOprGoogleLinkFlow({ fromInvite: true });
+              } catch (e2) {
+                toast.error(
+                  e2 instanceof Error ? e2.message : 'Google 연동을 시작할 수 없습니다.',
+                );
+              }
+              return;
+            }
+            failMessages.push(msg);
+          }
+        }
+        sessionStorage.removeItem(OPR_PENDING_INVITE_SEND_STORAGE_KEY);
+        if (success > 0) {
+          toast.success(`${success}건 초대 메일 발송 완료`);
+          if (mounted) {
+            setRecipients([{ company: '', email: '', contactName: '', scopeId: undefined }]);
+          }
+          try {
+            const rows = await getInvitationHistory({ limit: 50 });
+            const { invitationStatusById: statusMap, sentHistory: mapped } = buildInvitationHistoryState(
+              rows,
+              '—',
+            );
+            if (mounted) {
+              setInvitationStatusById(statusMap);
+              setSentHistory(mapped);
+            }
+          } catch {
+            /* ignore */
+          }
+          if (mounted) void reloadTier1Ref.current();
+        }
+        if (failMessages.length > 0 && mounted) {
+          toast.error(`실패 ${failMessages.length}건: ${failMessages[0]}`);
+        }
+      } finally {
+        if (mounted) setSendInvitesLoading(false);
+        inviteResumeInFlightRef.current = false;
+      }
+    };
+
     // 세션 복원 대기 후 로드
     const timer = setTimeout(() => {
       void loadTier1Suppliers();
       void loadHistory();
+      void loadAttachmentRevision();
+      void resumePendingInviteSends();
     }, 500);
-    
+
     // 세션 업데이트 이벤트 리스너
     const handleSessionUpdate = () => {
       clearTimeout(timer);
       void loadTier1Suppliers();
       void loadHistory();
+      void loadAttachmentRevision();
+      void resumePendingInviteSends();
     };
     
     if (typeof window !== 'undefined') {
@@ -388,6 +598,18 @@ https://aifix.com/signup
   const supplierEmailById = useMemo(() => {
     return {} as Record<string, string>;
   }, []);
+
+  const hasInviteReadyRecipient = useMemo(
+    () =>
+      recipients.some(
+        (r) =>
+          r.company.trim() &&
+          r.contactName.trim() &&
+          r.email.trim() &&
+          isPlausibleInviteEmail(r.email),
+      ),
+    [recipients],
+  );
 
   const normalizeTier1Company = (companyInput: string, scopeId?: string) => {
     if (scopeId) {
@@ -414,6 +636,55 @@ https://aifix.com/signup
     setRecipients((prev) => [...prev, { company: '', email: '', contactName: '', scopeId: undefined }]);
   };
 
+  /**
+   * PDF를 받은 뒤에만 window.open 하면 클릭과 타이밍이 어긋나 팝업 차단되는 경우가 많음.
+   * 클릭 직후(동기) 빈 탭을 열고, fetch 후 그 탭으로 blob URL을 넣는다.
+   */
+  const handleAttachmentPreview = () => {
+    const previewWin = window.open('about:blank', '_blank');
+    if (!previewWin) {
+      toast.error('팝업이 차단되었습니다. 브라우저에서 팝업을 허용한 뒤 다시 시도해 주세요.');
+      return;
+    }
+    try {
+      previewWin.document.write(
+        '<!DOCTYPE html><html><head><meta charset="utf-8"><title>미리보기</title></head><body style="font-family:system-ui,sans-serif;padding:2rem;color:#64748b">PDF를 불러오는 중…</body></html>',
+      );
+      previewWin.document.close();
+    } catch {
+      previewWin.close();
+      toast.error('미리보기 창을 열 수 없습니다.');
+      return;
+    }
+
+    void (async () => {
+      setAttachmentPreviewLoading(true);
+      let objectUrl: string | null = null;
+      try {
+        // 모달 로드 시 이미 조회한 개정이 있으면 메타 API 한 번 더 쓰지 않음(왕복·대기 감소)
+        const revisionId =
+          attachmentRevision?.id ??
+          (await getInvitationAttachmentDataContractRevision()).id;
+        const blob = await fetchContractRevisionPdfBlob(revisionId);
+        objectUrl = URL.createObjectURL(blob);
+        previewWin.location.replace(objectUrl);
+        window.setTimeout(() => {
+          if (objectUrl) URL.revokeObjectURL(objectUrl);
+        }, 120_000);
+      } catch (e) {
+        previewWin.close();
+        const msg = e instanceof Error ? e.message : String(e);
+        if (msg.includes('404')) {
+          toast.error('첨부할 활성 데이터컨트랙트가 없거나 PDF가 아직 준비되지 않았습니다.');
+        } else {
+          toast.error(msg.length > 120 ? '미리보기를 불러오지 못했습니다.' : msg);
+        }
+      } finally {
+        setAttachmentPreviewLoading(false);
+      }
+    })();
+  };
+
   const handleSend = async () => {
     const nonEmptyCards = recipients.filter(r => r.company.trim() || r.email.trim() || r.contactName.trim());
 
@@ -429,6 +700,10 @@ https://aifix.com/signup
       }
       if (!r.email.trim()) {
         toast.error('이메일을 입력해주세요');
+        return;
+      }
+      if (!isPlausibleInviteEmail(r.email)) {
+        toast.error('담당자 이메일 형식을 확인해 주세요. (예: name@company.com)');
         return;
       }
       if (!r.contactName.trim()) {
@@ -447,77 +722,83 @@ https://aifix.com/signup
       }
     }
 
-    let success = 0;
-    const failMessages: string[] = [];
-    
     // 백엔드 전달용: 화면의 모든 URL을 {link} 플레이스홀더로 변환
-    // 단어 경계까지 포함하여 URL 전체를 찾기
     const bodyForBackend = body.trim().replace(/https?:\/\/[^\s]+/g, '{link}');
-    
+
+    const payloads: OprInvitePayload[] = [];
     for (const r of nonEmptyCards) {
       const matched = normalizeTier1Company(r.company, r.scopeId);
       if (!matched?.supplierId || !matched.productVariantId || !matched.projectId) continue;
-      try {
-        await postOprInvitation({
-          project_id: matched.projectId,
-          product_variant_id: matched.productVariantId,
-          supplier_id: matched.supplierId,
-          invitee: {
-            company_name: r.company.trim(),
-            contact_name: r.contactName.trim(),
-            email: r.email.trim(),
-          },
-          expire_days: 3,
-          email_subject: subject.trim(),
-          email_body: bodyForBackend,
-        });
-        success += 1;
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : '발송 실패';
-        if (msg.includes('428') || msg.toLowerCase().includes('gmail')) {
-          toast.message(
-            '초대 메일은 연동된 Google 계정(Gmail)으로 발송됩니다. Google 연동 화면으로 이동합니다.',
-          );
-          try {
-            await startOprGoogleLinkFlow({ fromInvite: true });
-          } catch (e2) {
-            toast.error(
-              e2 instanceof Error ? e2.message : 'Google 연동을 시작할 수 없습니다.',
+      payloads.push({
+        project_id: matched.projectId,
+        product_variant_id: matched.productVariantId,
+        supplier_id: matched.supplierId,
+        invitee: {
+          company_name: r.company.trim(),
+          contact_name: r.contactName.trim(),
+          email: r.email.trim(),
+        },
+        expire_days: 3,
+        email_subject: subject.trim(),
+        email_body: bodyForBackend,
+      });
+    }
+
+    if (payloads.length === 0) {
+      toast.error('발송할 수 있는 수신인이 없습니다');
+      return;
+    }
+
+    setSendInvitesLoading(true);
+    try {
+      let success = 0;
+      const failMessages: string[] = [];
+
+      for (let i = 0; i < payloads.length; i++) {
+        try {
+          await postOprInvitation(payloads[i]);
+          success += 1;
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : '발송 실패';
+          if (msg.includes('428') || msg.toLowerCase().includes('gmail')) {
+            sessionStorage.setItem(
+              OPR_PENDING_INVITE_SEND_STORAGE_KEY,
+              JSON.stringify(payloads.slice(i)),
             );
+            toast.message(
+              '초대 메일은 연동된 Google 계정(Gmail)으로 발송됩니다. Google 연동 화면으로 이동합니다.',
+            );
+            try {
+              await startOprGoogleLinkFlow({ fromInvite: true });
+            } catch (e2) {
+              toast.error(
+                e2 instanceof Error ? e2.message : 'Google 연동을 시작할 수 없습니다.',
+              );
+            }
+            return;
           }
-          return;
+          failMessages.push(msg);
         }
-        failMessages.push(msg);
       }
-    }
-    if (success > 0) {
-      toast.success(`${success}건 초대 메일 발송 완료`);
-      setRecipients([{ company: '', email: '', contactName: '', scopeId: undefined }]);
-      try {
-        const rows = await getInvitationHistory({ limit: 50 });
-        const mapped = rows.map((r: InvitationHistoryItem) => ({
-          company: r.invitee_company_hint || '-',
-          email: r.invitee_email || '-',
-          sentDate: new Date(r.created_at).toLocaleString(),
-          version: 'v2.0',
-          status: r.status === 'failed' ? 'failed' : 'sent',
-          opened: r.status === 'in_progress' || r.status === 'completed',
-          projectAccess:
-            r.status === 'completed'
-              ? 'approved'
-              : r.status === 'revoked'
-                ? 'rejected'
-                : r.status === 'in_progress'
-                  ? 'pending'
-                  : 'waiting',
-        }));
-        setSentHistory(mapped);
-      } catch {
-        // ignore refresh fail
+      if (success > 0) {
+        toast.success(`${success}건 초대 메일 발송 완료`);
+        setRecipients([{ company: '', email: '', contactName: '', scopeId: undefined }]);
+        try {
+          const rows = await getInvitationHistory({ limit: 50 });
+          const { invitationStatusById: statusMap, sentHistory: mapped } =
+            buildInvitationHistoryState(rows, inviteContractVersionLabel);
+          setInvitationStatusById(statusMap);
+          setSentHistory(mapped);
+        } catch {
+          // ignore refresh fail
+        }
+        void reloadTier1Ref.current();
       }
-    }
-    if (failMessages.length > 0) {
-      toast.error(`실패 ${failMessages.length}건: ${failMessages[0]}`);
+      if (failMessages.length > 0) {
+        toast.error(`실패 ${failMessages.length}건: ${failMessages[0]}`);
+      }
+    } finally {
+      setSendInvitesLoading(false);
     }
   };
 
@@ -596,6 +877,10 @@ https://aifix.com/signup
 
           const companyKey = company.trim().toLowerCase();
           if (!companyKey || !email.trim()) continue;
+          if (!isPlausibleInviteEmail(email)) {
+            skippedCount++;
+            continue;
+          }
 
           const isRegistered = normalizedSuppliers.some(s => s.name === companyKey);
           if (!isRegistered) {
@@ -625,20 +910,33 @@ https://aifix.com/signup
     reader.readAsText(file, 'utf-8');
   };
 
-  const getStatusIcon = (status: string, opened: boolean) => {
-    if (status === 'failed') {
-      return <AlertCircle size={16} className="text-red-500" />;
+  const getReadReceiptDisplay = (item: SentHistoryRow) => {
+    if (item.inviteStatus === 'revoked') {
+      return {
+        icon: <Ban size={16} className="text-gray-500 shrink-0" aria-hidden />,
+        label: '발송 취소됨',
+        labelClass: 'text-gray-600',
+      };
     }
-    if (opened) {
-      return <CheckCircle size={16} className="text-teal-500" />;
+    if (item.inviteStatus === 'failed' || item.status === 'failed') {
+      return {
+        icon: <AlertCircle size={16} className="text-red-500 shrink-0" aria-hidden />,
+        label: '전송실패',
+        labelClass: 'text-red-600',
+      };
     }
-    return <Clock size={16} className="text-gray-400" />;
-  };
-
-  const getStatusText = (status: string, opened: boolean) => {
-    if (status === 'failed') return '전송실패';
-    if (opened) return '열람확인';
-    return '전송완료';
+    if (item.opened) {
+      return {
+        icon: <CheckCircle size={16} className="text-teal-500 shrink-0" aria-hidden />,
+        label: '열람확인',
+        labelClass: 'text-teal-600',
+      };
+    }
+    return {
+      icon: <Clock size={16} className="text-gray-400 shrink-0" aria-hidden />,
+      label: '전송완료',
+      labelClass: 'text-gray-600',
+    };
   };
 
   const handleApprove = async (index: number) => {
@@ -650,9 +948,18 @@ https://aifix.com/signup
     
     try {
       await approveSignupRequest(item.signupRequestId);
-      const updatedHistory = [...sentHistory];
-      updatedHistory[index].projectAccess = 'approved';
-      setSentHistory(updatedHistory);
+      try {
+        const rows = await getInvitationHistory({ limit: 50 });
+        const { invitationStatusById: statusMap, sentHistory: mapped } =
+          buildInvitationHistoryState(rows, inviteContractVersionLabel);
+        setInvitationStatusById(statusMap);
+        setSentHistory(mapped);
+      } catch {
+        const updatedHistory = [...sentHistory];
+        updatedHistory[index].projectAccess = 'approved';
+        setSentHistory(updatedHistory);
+      }
+      void reloadTier1Ref.current();
       toast.success(`${item.company}의 프로젝트 진입을 승인했습니다`);
     } catch (error) {
       console.error('승인 실패:', error);
@@ -669,13 +976,55 @@ https://aifix.com/signup
     
     try {
       await rejectSignupRequest(item.signupRequestId, '원청 담당자가 반려했습니다');
-      const updatedHistory = [...sentHistory];
-      updatedHistory[index].projectAccess = 'rejected';
-      setSentHistory(updatedHistory);
+      try {
+        const rows = await getInvitationHistory({ limit: 50 });
+        const { invitationStatusById: statusMap, sentHistory: mapped } =
+          buildInvitationHistoryState(rows, inviteContractVersionLabel);
+        setInvitationStatusById(statusMap);
+        setSentHistory(mapped);
+      } catch {
+        const updatedHistory = [...sentHistory];
+        updatedHistory[index].projectAccess = 'rejected';
+        setSentHistory(updatedHistory);
+      }
+      void reloadTier1Ref.current();
       toast.error(`${item.company}의 프로젝트 진입을 반려했습니다`);
     } catch (error) {
       console.error('반려 실패:', error);
       toast.error('반려 처리에 실패했습니다');
+    }
+  };
+
+  const handleRevokeInvite = async (item: SentHistoryRow) => {
+    if (
+      !window.confirm(
+        '이 초대 메일의 링크를 무효화합니다. 수신자는 더 이상 해당 링크로 가입을 진행할 수 없습니다. 계속할까요?',
+      )
+    ) {
+      return;
+    }
+    setRevokingInvitationId(item.invitationId);
+    try {
+      await postRevokeInvitation(item.invitationId);
+      toast.success('발송이 취소되었고 초대 링크가 무효화되었습니다.');
+      try {
+        const rows = await getInvitationHistory({ limit: 50 });
+        const { invitationStatusById: statusMap, sentHistory: mapped } = buildInvitationHistoryState(
+          rows,
+          inviteContractVersionLabel,
+        );
+        setInvitationStatusById(statusMap);
+        setSentHistory(mapped);
+      } catch {
+        /* ignore */
+      }
+      void reloadTier1Ref.current();
+    } catch (error) {
+      console.error('발송 취소 실패:', error);
+      const msg = error instanceof Error ? error.message : '발송 취소에 실패했습니다.';
+      toast.error(msg);
+    } finally {
+      setRevokingInvitationId(null);
     }
   };
 
@@ -707,6 +1056,20 @@ https://aifix.com/signup
           <span className="flex items-center gap-1 px-2 py-1 bg-gray-100 text-gray-600 rounded-md text-xs font-medium">
             <Clock className="w-3 h-3" />
             진입대기
+          </span>
+        );
+      case 'awaiting_signup':
+        return (
+          <span className="flex items-center gap-1 px-2 py-1 bg-amber-50 text-amber-800 rounded-md text-xs font-medium">
+            <Clock className="w-3 h-3" />
+            회원가입 대기
+          </span>
+        );
+      case 'invite_revoked':
+        return (
+          <span className="flex items-center gap-1 px-2 py-1 bg-slate-100 text-slate-700 rounded-md text-xs font-medium">
+            <Ban className="w-3 h-3" />
+            링크 무효화
           </span>
         );
       default:
@@ -786,6 +1149,7 @@ https://aifix.com/signup
                       eligibleTier1Suppliers={eligibleTier1Suppliers}
                       supplierEmailById={supplierEmailById}
                       suppliersLoading={loadingSuppliers}
+                      invitationStatusById={invitationStatusById}
                       onChange={(next) => {
                         setRecipients(prev => prev.map((r, i) => (i === idx ? next : r)));
                       }}
@@ -859,20 +1223,41 @@ https://aifix.com/signup
                 <label className="block text-sm font-semibold text-gray-700 mb-2">제3자 제공 동의서 버전</label>
                 <div className="flex gap-3">
                   <select
-                    value={selectedVersion}
-                    onChange={(e) => setSelectedVersion(e.target.value)}
+                    value={
+                      attachmentRevisionLoading
+                        ? '__loading__'
+                        : attachmentRevision
+                          ? `${displayVersionCode(attachmentRevision.version_code)} (${attachmentRevision.effective_from.slice(0, 10)})`
+                          : '__none__'
+                    }
+                    onChange={() => {}}
+                    aria-label="현재 초대에 첨부되는 동의서 버전"
                     className="flex-1 px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500 bg-gray-50"
                     disabled
                   >
-                    {contractVersions.map((version) => (
-                      <option key={version.value} value={version.value}>
-                        {version.label}
+                    {attachmentRevisionLoading ? (
+                      <option value="__loading__">불러오는 중…</option>
+                    ) : attachmentRevision ? (
+                      <option
+                        value={`${displayVersionCode(attachmentRevision.version_code)} (${attachmentRevision.effective_from.slice(0, 10)})`}
+                      >
+                        {displayVersionCode(attachmentRevision.version_code)} (
+                        {attachmentRevision.effective_from.slice(0, 10)})
                       </option>
-                    ))}
+                    ) : (
+                      <option value="__none__">활성 동의서 없음 (데이터컨트랙트를 확인하세요)</option>
+                    )}
                   </select>
-                  <button className="px-4 py-2.5 border border-gray-300 text-gray-700 font-medium rounded-xl hover:bg-gray-50 transition-all flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void handleAttachmentPreview()}
+                    disabled={
+                      attachmentPreviewLoading || attachmentRevisionLoading || attachmentRevision == null
+                    }
+                    className="px-4 py-2.5 border border-gray-300 text-gray-700 font-medium rounded-xl hover:bg-gray-50 transition-all flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
                     <Eye size={16} />
-                    미리보기
+                    {attachmentPreviewLoading ? '불러오는 중…' : '미리보기'}
                   </button>
                 </div>
                 <p className="text-xs text-gray-500 mt-2">* 제3자 제공 동의서는 법무 확정 PDF로 자동 첨부되며 수정 불가합니다</p>
@@ -885,8 +1270,11 @@ https://aifix.com/signup
                   <div className="flex items-center gap-3">
                     <FileText size={20} className="text-purple-600" />
                     <div>
-                      <p className="text-sm font-medium text-gray-900">DATA_CONTRACT_{selectedVersion}.pdf</p>
-                      <p className="text-xs text-gray-500">자동 첨부됨</p>
+                      <p className="text-sm font-medium text-gray-900">
+                        {inviteAttachmentFileName ??
+                          (attachmentRevisionLoading ? '…' : '활성 동의서 PDF 없음')}
+                      </p>
+                      <p className="text-xs text-gray-500">자동 첨부됨 (발송 시 서버와 동일 파일명)</p>
                     </div>
                   </div>
                 </div>
@@ -894,18 +1282,29 @@ https://aifix.com/signup
 
               {/* 발송 버튼 */}
               <button
-                onClick={handleSend}
-                disabled={!recipients.some(r => r.company.trim() && r.email.trim() && r.contactName.trim())}
-                className="w-full py-3.5 text-white font-semibold rounded-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                type="button"
+                onClick={() => void handleSend()}
+                disabled={!hasInviteReadyRecipient || sendInvitesLoading}
+                aria-busy={sendInvitesLoading}
+                className={`w-full py-3.5 text-white font-semibold rounded-[14px] flex items-center justify-center gap-2 select-none transition-[transform,box-shadow,filter,opacity] duration-150 ease-out ${
+                  !hasInviteReadyRecipient
+                    ? 'cursor-not-allowed opacity-50'
+                    : sendInvitesLoading
+                      ? 'cursor-wait shadow-md shadow-[#5B3BFA]/25'
+                      : 'cursor-pointer shadow-md shadow-[#5B3BFA]/35 hover:shadow-lg hover:shadow-[#5B3BFA]/40 hover:brightness-[1.03] active:scale-[0.98] active:brightness-[0.96] active:shadow-inner focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5B3BFA] focus-visible:ring-offset-2'
+                }`}
                 style={{
-                  background: recipients.some(r => r.company.trim() && r.email.trim() && r.contactName.trim())
+                  background: hasInviteReadyRecipient
                     ? 'linear-gradient(90deg, #5B3BFA, #00B4FF)'
                     : '#e5e7eb',
-                  borderRadius: '14px',
                 }}
               >
-                <Send size={18} />
-                초대 메일 발송
+                {sendInvitesLoading ? (
+                  <Loader2 size={18} className="animate-spin shrink-0" aria-hidden />
+                ) : (
+                  <Send size={18} className="shrink-0" aria-hidden />
+                )}
+                {sendInvitesLoading ? '발송 중…' : '초대 메일 발송'}
               </button>
             </div>
           )}
@@ -922,46 +1321,57 @@ https://aifix.com/signup
           <h2 className="text-lg font-bold text-gray-900 mb-6">발송 기록</h2>
 
           <div className="space-y-3">
-            {sentHistory.map((item, idx) => (
+            {sentHistory.map((item, idx) => {
+              const receipt = getReadReceiptDisplay(item);
+              const canRevoke =
+                mode !== 'pcf' &&
+                (item.inviteStatus === 'sent' || item.inviteStatus === 'in_progress');
+              return (
               <div
-                key={idx}
+                key={item.invitationId ?? idx}
                 className="p-4 border border-gray-200 rounded-xl hover:border-purple-300 hover:bg-purple-50/30 transition-all"
               >
-                <div className="flex items-start justify-between mb-2">
-                  <div className="flex-1">
+                <div className="flex items-start justify-between gap-2 mb-2">
+                  <div className="flex-1 min-w-0">
                     <p className="font-semibold text-gray-900 mb-1">{item.company}</p>
                     <p className="text-sm text-gray-600 mb-2">{item.email}</p>
                   </div>
-                  <div className="flex items-center gap-1.5">
-                    {getStatusIcon(item.status, item.opened)}
-                    <span className={`text-xs font-medium ${
-                      item.status === 'failed' ? 'text-red-600' : 
-                      item.opened ? 'text-teal-600' : 'text-gray-600'
-                    }`}>
-                      {getStatusText(item.status, item.opened)}
-                    </span>
-                  </div>
+                  {canRevoke ? (
+                    <button
+                      type="button"
+                      onClick={() => void handleRevokeInvite(item)}
+                      disabled={revokingInvitationId === item.invitationId}
+                      className="shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border border-red-200 text-red-700 bg-red-50 hover:bg-red-100 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+                    >
+                      {revokingInvitationId === item.invitationId ? (
+                        <Loader2 size={14} className="animate-spin shrink-0" aria-hidden />
+                      ) : null}
+                      발송 취소
+                    </button>
+                  ) : null}
                 </div>
-                
+
                 <div className="flex items-center justify-between text-xs text-gray-500 mb-3">
                   <span>{item.sentDate}</span>
                   <span className="px-2 py-1 bg-gray-100 rounded-md">{item.version}</span>
                 </div>
 
-                {/* 프로젝트 진입 승인 상태 및 버튼 - 구매 직무만 액션 가능 */}
+                {/* 프로젝트 진입 승인: 왼쪽 열람·전송 상태, 오른쪽 회원가입 대기 등 */}
                 <div className="pt-3 border-t border-gray-200">
-                  <div className="flex items-center justify-between">
-                    <div className="text-xs text-gray-600 font-medium">프로젝트 진입 승인</div>
-                    
-                    {/* ESG 직무: 상태 조회만 가능 */}
-                    {mode === 'pcf' ? (
-                      getProjectAccessBadge(item.projectAccess)
-                    ) : (
-                      /* 구매 직무: 승인/반려 버튼 표시 */
-                      item.projectAccess === 'pending' ? (
-                        <div className="flex items-center gap-2">
+                  <div className="text-xs text-gray-600 font-medium mb-2">프로젝트 진입 승인</div>
+                  <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      {receipt.icon}
+                      <span className={`text-xs font-medium ${receipt.labelClass}`}>{receipt.label}</span>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {mode === 'pcf' ? (
+                        getProjectAccessBadge(item.projectAccess)
+                      ) : item.projectAccess === 'pending' ? (
+                        <>
                           {getProjectAccessBadge(item.projectAccess)}
                           <button
+                            type="button"
                             onClick={() => handleApprove(idx)}
                             className="px-3 py-1.5 bg-gradient-to-r from-[#00B4FF] to-[#5B3BFA] text-white text-xs font-medium rounded-lg hover:shadow-md transition-all flex items-center gap-1"
                           >
@@ -969,21 +1379,23 @@ https://aifix.com/signup
                             승인
                           </button>
                           <button
+                            type="button"
                             onClick={() => handleReject(idx)}
                             className="px-3 py-1.5 bg-red-500 text-white text-xs font-medium rounded-lg hover:bg-red-600 transition-all flex items-center gap-1"
                           >
                             <XCircle className="w-3 h-3" />
                             반려
                           </button>
-                        </div>
+                        </>
                       ) : (
                         getProjectAccessBadge(item.projectAccess)
-                      )
-                    )}
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>
-            ))}
+            );
+            })}
           </div>
 
           <div className="mt-6 p-4 bg-blue-50 rounded-xl border border-blue-200">

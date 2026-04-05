@@ -1,7 +1,17 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, ChevronRight, Plus, Search, Check, Minus, X, UserPlus } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  AlertCircle,
+  ChevronDown,
+  ChevronRight,
+  Plus,
+  Search,
+  Check,
+  Minus,
+  X,
+  UserPlus,
+} from 'lucide-react';
 import { toast } from 'sonner';
 import SupplyChainDiagram from './SupplyChainDiagram';
 import Invite from './Invite';
@@ -348,6 +358,26 @@ export default function ProjectSupplyChain() {
   const [modalSuppliers, setModalSuppliers] = useState<ApiSupplierBrief[]>([]);
   const [modalSuppliersLoading, setModalSuppliersLoading] = useState(false);
   const [modalSuppliersError, setModalSuppliersError] = useState<string | null>(null);
+  /** 1차 협력사 추가 모달: 추가하기 클릭 시 미선택 필드 표시 */
+  const [addSupplierModalErrors, setAddSupplierModalErrors] = useState<{
+    customer?: boolean;
+    branch?: boolean;
+    product?: boolean;
+    detailProduct?: boolean;
+    supplier?: boolean;
+  }>({});
+  const [addSupplierModalErrorBanner, setAddSupplierModalErrorBanner] = useState<string | null>(
+    null,
+  );
+
+  const clearAddSupplierModalValidation = useCallback(() => {
+    setAddSupplierModalErrors({});
+    setAddSupplierModalErrorBanner(null);
+  }, []);
+
+  useEffect(() => {
+    if (showAddSupplierModal) clearAddSupplierModalValidation();
+  }, [showAddSupplierModal, clearAddSupplierModalValidation]);
 
   // DB/API 데이터만 사용 (mock fallback 비활성화)
   const projectRows = apiProjects;
@@ -1060,17 +1090,51 @@ export default function ProjectSupplyChain() {
     const rProject = modalProject || mProjects[0]?.id || '';
     const mPgs = mProjects.find((p) => p.id === rProject)?.productGroups ?? [];
     const rPg = modalProductGroup || mPgs[0]?.id || '';
-    if (!modalCustomer || !modalBranch || !rProject || !rPg || !modalDetailProduct || !modalSupplier) {
-      toast.error('고객사·지사·제품·세부제품·협력사를 모두 선택해 주세요');
+
+    const nextErrors: {
+      customer?: boolean;
+      branch?: boolean;
+      product?: boolean;
+      detailProduct?: boolean;
+      supplier?: boolean;
+    } = {};
+    if (!modalCustomer) nextErrors.customer = true;
+    if (!modalBranch) nextErrors.branch = true;
+    if (modalCustomer && modalBranch && !rProject) {
+      nextErrors.branch = true;
+    }
+    if (rProject && !rPg) nextErrors.product = true;
+    if (!modalDetailProduct) nextErrors.detailProduct = true;
+    if (!modalSupplier) nextErrors.supplier = true;
+
+    if (Object.keys(nextErrors).length > 0) {
+      setAddSupplierModalErrors(nextErrors);
+      if (modalCustomer && modalBranch && !rProject) {
+        setAddSupplierModalErrorBanner(
+          '선택한 고객사·지사에 연결된 프로젝트가 없습니다. 조건을 바꿔 주세요.',
+        );
+      } else {
+        setAddSupplierModalErrorBanner(
+          '고객사·지사·제품·세부제품·협력사를 모두 선택해 주세요.',
+        );
+      }
       return;
     }
+
     const nProj = Number(rProject);
     const nVariant = Number(modalDetailProduct);
     const nSup = Number(modalSupplier);
     if (!Number.isFinite(nProj) || !Number.isFinite(nVariant) || !Number.isFinite(nSup)) {
-      toast.error('선택 값이 올바르지 않습니다');
+      setAddSupplierModalErrors({
+        customer: !Number.isFinite(nProj),
+        detailProduct: !Number.isFinite(nVariant),
+        supplier: !Number.isFinite(nSup),
+      });
+      setAddSupplierModalErrorBanner('선택 값이 올바르지 않습니다. 항목을 다시 선택해 주세요.');
       return;
     }
+
+    clearAddSupplierModalValidation();
     const selected = modalSuppliers.find((s) => String(s.id) === modalSupplier);
     try {
       await apiFetch(
@@ -1136,14 +1200,31 @@ export default function ProjectSupplyChain() {
   const selectedModalBomCode = selectedModalDetailProduct?.bomCode || '';
 
   const filteredSuppliers = useMemo(() => {
-    const q = supplierSearchTerm.trim().toLowerCase();
-    if (!q) return modalSuppliers;
-    return modalSuppliers.filter(
-      (s) =>
-        s.name.toLowerCase().includes(q) ||
-        (s.code ?? '').toLowerCase().includes(q),
-    );
-  }, [modalSuppliers, supplierSearchTerm]);
+    const raw = supplierSearchTerm.trim().toLowerCase();
+    if (!raw) return modalSuppliers;
+
+    const selected = modalSuppliers.find((s) => String(s.id) === modalSupplier);
+    if (selected) {
+      const n = selected.name.toLowerCase();
+      const c = (selected.code ?? '').toLowerCase();
+      const combined = c ? `${n} (${c})` : n;
+      if (raw === n || raw === c || raw === combined) {
+        return modalSuppliers;
+      }
+    }
+
+    return modalSuppliers.filter((s) => {
+      const name = s.name.toLowerCase();
+      const code = (s.code ?? '').toLowerCase();
+      const combined = code ? `${name} (${code})` : name;
+      return (
+        name.includes(raw) ||
+        code.includes(raw) ||
+        combined.includes(raw) ||
+        raw.includes(name)
+      );
+    });
+  }, [modalSuppliers, supplierSearchTerm, modalSupplier]);
 
   return (
     <div className="min-h-screen bg-[#F6F8FB]">
@@ -1456,7 +1537,18 @@ export default function ProjectSupplyChain() {
       {showAddSupplierModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
           <div className="bg-white rounded-2xl p-8 max-w-2xl w-full mx-4" style={{ boxShadow: '0px 8px 32px rgba(0, 0, 0, 0.12)' }}>
-            <h2 className="text-2xl font-bold text-gray-900 mb-6">1차 협력사 추가</h2>
+            <h2 className="text-2xl font-bold text-gray-900 mb-2">1차 협력사 추가</h2>
+            {addSupplierModalErrorBanner ? (
+              <div
+                className="mb-4 flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-800"
+                role="alert"
+              >
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-600" aria-hidden />
+                <span>{addSupplierModalErrorBanner}</span>
+              </div>
+            ) : (
+              <div className="mb-4" />
+            )}
 
             {/* Form */}
             <div className="space-y-4 mb-6">
@@ -1464,17 +1556,27 @@ export default function ProjectSupplyChain() {
               <div>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-xs text-gray-600 mb-1">고객사</label>
+                    <label
+                      className={`block text-xs mb-1 ${addSupplierModalErrors.customer ? 'text-red-600 font-semibold' : 'text-gray-600'}`}
+                    >
+                      고객사
+                    </label>
                     <select
                       value={modalCustomer}
                       onChange={(e) => {
+                        clearAddSupplierModalValidation();
                         setModalCustomer(e.target.value);
                         setModalBranch('');
                         setModalProject('');
                         setModalProductGroup('');
                         setModalDetailProduct('');
                       }}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
+                      aria-invalid={addSupplierModalErrors.customer ? true : undefined}
+                      className={`w-full px-3 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 ${
+                        addSupplierModalErrors.customer
+                          ? 'border-2 border-red-500 ring-2 ring-red-200 focus:ring-red-400'
+                          : 'border border-gray-300 focus:ring-purple-500'
+                      }`}
                     >
                       <option value="">선택</option>
                       {customers.map((customer) => (
@@ -1485,16 +1587,26 @@ export default function ProjectSupplyChain() {
                     </select>
                   </div>
                   <div>
-                    <label className="block text-xs text-gray-600 mb-1">세부 지사</label>
+                    <label
+                      className={`block text-xs mb-1 ${addSupplierModalErrors.branch ? 'text-red-600 font-semibold' : 'text-gray-600'}`}
+                    >
+                      세부 지사
+                    </label>
                     <select
                       value={modalBranch}
                       onChange={(e) => {
+                        clearAddSupplierModalValidation();
                         setModalBranch(e.target.value);
                         setModalProject('');
                         setModalProductGroup('');
                         setModalDetailProduct('');
                       }}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
+                      aria-invalid={addSupplierModalErrors.branch ? true : undefined}
+                      className={`w-full px-3 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 ${
+                        addSupplierModalErrors.branch
+                          ? 'border-2 border-red-500 ring-2 ring-red-200 focus:ring-red-400'
+                          : 'border border-gray-300 focus:ring-purple-500'
+                      }`}
                     >
                       <option value="">선택</option>
                       {modalBranchOptions.map((branch) => (
@@ -1511,14 +1623,24 @@ export default function ProjectSupplyChain() {
               <div>
                 <div className="grid grid-cols-3 gap-3">
                   <div>
-                    <label className="block text-xs text-gray-600 mb-1">제품</label>
+                    <label
+                      className={`block text-xs mb-1 ${addSupplierModalErrors.product ? 'text-red-600 font-semibold' : 'text-gray-600'}`}
+                    >
+                      제품
+                    </label>
                     <select
                       value={resolvedModalProductGroup}
                       onChange={(e) => {
+                        clearAddSupplierModalValidation();
                         setModalProductGroup(e.target.value);
                         setModalDetailProduct('');
                       }}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
+                      aria-invalid={addSupplierModalErrors.product ? true : undefined}
+                      className={`w-full px-3 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 ${
+                        addSupplierModalErrors.product
+                          ? 'border-2 border-red-500 ring-2 ring-red-200 focus:ring-red-400'
+                          : 'border border-gray-300 focus:ring-purple-500'
+                      }`}
                     >
                       <option value="">선택</option>
                       {modalProductGroups.map((pg) => (
@@ -1529,11 +1651,23 @@ export default function ProjectSupplyChain() {
                     </select>
                   </div>
                   <div>
-                    <label className="block text-xs text-gray-600 mb-1">세부제품</label>
+                    <label
+                      className={`block text-xs mb-1 ${addSupplierModalErrors.detailProduct ? 'text-red-600 font-semibold' : 'text-gray-600'}`}
+                    >
+                      세부제품
+                    </label>
                     <select
                       value={modalDetailProduct}
-                      onChange={(e) => setModalDetailProduct(e.target.value)}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
+                      onChange={(e) => {
+                        clearAddSupplierModalValidation();
+                        setModalDetailProduct(e.target.value);
+                      }}
+                      aria-invalid={addSupplierModalErrors.detailProduct ? true : undefined}
+                      className={`w-full px-3 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 ${
+                        addSupplierModalErrors.detailProduct
+                          ? 'border-2 border-red-500 ring-2 ring-red-200 focus:ring-red-400'
+                          : 'border border-gray-300 focus:ring-purple-500'
+                      }`}
                     >
                       <option value="">선택</option>
                       {modalProductGroups
@@ -1559,18 +1693,35 @@ export default function ProjectSupplyChain() {
 
               {/* Supplier Selection */}
               <div>
-                <h3 className="text-sm font-semibold text-gray-700 mb-3">협력사 선택</h3>
+                <h3
+                  className={`text-sm font-semibold mb-3 ${addSupplierModalErrors.supplier ? 'text-red-600' : 'text-gray-700'}`}
+                >
+                  협력사 선택
+                </h3>
                 <div className="relative">
                   <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
                   <input
                     type="text"
                     placeholder="협력사 검색..."
                     value={supplierSearchTerm}
-                    onChange={(e) => setSupplierSearchTerm(e.target.value)}
-                    className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
+                    onChange={(e) => {
+                      clearAddSupplierModalValidation();
+                      setSupplierSearchTerm(e.target.value);
+                    }}
+                    className={`w-full pl-10 pr-4 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 ${
+                      addSupplierModalErrors.supplier
+                        ? 'border-2 border-red-500 ring-2 ring-red-200 focus:ring-red-400'
+                        : 'border border-gray-300 focus:ring-purple-500'
+                    }`}
                   />
                 </div>
-                <div className="mt-2 max-h-40 overflow-y-auto border border-gray-200 rounded-lg">
+                <div
+                  className={`mt-2 max-h-40 overflow-y-auto rounded-lg ${
+                    addSupplierModalErrors.supplier
+                      ? 'border-2 border-red-500 ring-2 ring-red-200'
+                      : 'border border-gray-200'
+                  }`}
+                >
                   {modalSuppliersLoading && (
                     <div className="px-4 py-3 text-sm text-gray-500">협력사 목록 불러오는 중…</div>
                   )}
@@ -1597,7 +1748,14 @@ export default function ProjectSupplyChain() {
                       <button
                         key={supplier.id}
                         type="button"
-                        onClick={() => setModalSupplier(String(supplier.id))}
+                        onClick={() => {
+                          clearAddSupplierModalValidation();
+                          const label = supplier.code
+                            ? `${supplier.name} (${supplier.code})`
+                            : supplier.name;
+                          setSupplierSearchTerm(label);
+                          setModalSupplier(String(supplier.id));
+                        }}
                         className={`w-full text-left px-4 py-2 hover:bg-gray-50 transition-colors ${
                           modalSupplier === String(supplier.id)
                             ? 'bg-purple-50 text-purple-600'
@@ -1618,6 +1776,7 @@ export default function ProjectSupplyChain() {
             <div className="flex justify-end gap-3">
               <button
                 onClick={() => {
+                  clearAddSupplierModalValidation();
                   setShowAddSupplierModal(false);
                   setModalCustomer('');
                   setModalBranch('');

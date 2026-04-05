@@ -88,9 +88,13 @@ function demoMetricsForVariantMonth(ym: string, variantKey: string) {
   };
   return {
     electricityKwh: Math.round(85_000 + u() * 95_000),
+    wasteTon: Math.round((3.5 + u() * 42) * 100) / 100,
     production: Math.round(6_200 + u() * 18_000),
     temperatureC: Math.round((17 + u() * 15) * 10) / 10,
-    wasteTon: Math.round((3.5 + u() * 42) * 100) / 100,
+    /** 계약전력 (kW) */
+    contractPowerKw: Math.round(1_200 + u() * 4_800),
+    /** 설비용량 (kVA) */
+    facilityCapacityKva: Math.round((800 + u() * 3_200) * 10) / 10,
   };
 }
 
@@ -718,11 +722,14 @@ export default function IfOutlierPage() {
 
                     {isMonthOpen && metrics && (
                       <div className="overflow-x-auto p-4">
-                        <table className="w-full min-w-[560px] border-collapse text-sm">
+                        <table className="w-full min-w-[720px] border-collapse text-sm">
                           <thead>
                             <tr className="bg-[#F8F9FA]">
                               <th className="border border-gray-200 px-4 py-2.5 text-left font-semibold text-[var(--aifix-navy,#0f172a)]">
-                                전력사용량 (kWh)
+                                전력 (kWh)
+                              </th>
+                              <th className="border border-gray-200 px-4 py-2.5 text-left font-semibold text-[var(--aifix-navy,#0f172a)]">
+                                폐기물 (ton)
                               </th>
                               <th className="border border-gray-200 px-4 py-2.5 text-left font-semibold text-[var(--aifix-navy,#0f172a)]">
                                 생산량
@@ -731,7 +738,10 @@ export default function IfOutlierPage() {
                                 온도 (°C)
                               </th>
                               <th className="border border-gray-200 px-4 py-2.5 text-left font-semibold text-[var(--aifix-navy,#0f172a)]">
-                                폐기물 반출량 (ton)
+                                계약전력 (kW)
+                              </th>
+                              <th className="border border-gray-200 px-4 py-2.5 text-left font-semibold text-[var(--aifix-navy,#0f172a)]">
+                                설비용량 (kVA)
                               </th>
                             </tr>
                           </thead>
@@ -741,13 +751,19 @@ export default function IfOutlierPage() {
                                 {ni.format(metrics.electricityKwh)}
                               </td>
                               <td className="border border-gray-200 px-4 py-3 tabular-nums text-right text-gray-800">
+                                {nf.format(metrics.wasteTon)}
+                              </td>
+                              <td className="border border-gray-200 px-4 py-3 tabular-nums text-right text-gray-800">
                                 {ni.format(metrics.production)}
                               </td>
                               <td className="border border-gray-200 px-4 py-3 tabular-nums text-right text-gray-800">
                                 {nf.format(metrics.temperatureC)}
                               </td>
                               <td className="border border-gray-200 px-4 py-3 tabular-nums text-right text-gray-800">
-                                {nf.format(metrics.wasteTon)}
+                                {ni.format(metrics.contractPowerKw)}
+                              </td>
+                              <td className="border border-gray-200 px-4 py-3 tabular-nums text-right text-gray-800">
+                                {nf.format(metrics.facilityCapacityKva)}
                               </td>
                             </tr>
                           </tbody>
@@ -761,8 +777,8 @@ export default function IfOutlierPage() {
           })}
 
           <p className="text-xs text-gray-500 px-1">
-            데모 지표입니다. BOM 코드는 data-mgmt API로 조회하며, 전력·생산·온도·폐기물은 추후 MES/ERP
-            I/F API와 연결할 수 있습니다.
+            데모 지표입니다. BOM 코드는 data-mgmt API로 조회하며, 전력·폐기물·생산량·온도·계약전력·설비용량은
+            추후 MES/ERP I/F API와 연결할 수 있습니다.
           </p>
         </div>
       )}

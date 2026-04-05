@@ -560,6 +560,7 @@ export default function DataContract() {
                         onClick={(e) => {
                           e.stopPropagation();
                           setSelectedRevisionId(version.id);
+                          setPreviewTargetId(version.id);
                         }}
                       >
                         <Eye size={14} />

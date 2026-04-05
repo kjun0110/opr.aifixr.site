@@ -1,4 +1,5 @@
 import { apiFetch } from "./client";
+import type { ContractRevisionCurrentResponse } from "./data-contract";
 import { API_PREFIX } from "./paths";
 
 const BASE = API_PREFIX.INVITATION;
@@ -49,6 +50,8 @@ export type InvitationHistoryItem = {
   expires_at?: string | null;
   created_at: string;
   last_signup_request_id?: number | null;
+  /** 승인 대기(pending_approval) 가입 신청 id — 있을 때만 직상위 승인/반려 UI */
+  pending_signup_request_id?: number | null;
 };
 
 export async function postOprInvitation(
@@ -58,6 +61,13 @@ export async function postOprInvitation(
     method: "POST",
     json: payload,
   });
+}
+
+/** 초대 메일에 실제 첨부되는 DATA CONTRACT 개정 (is_current·active) */
+export async function getInvitationAttachmentDataContractRevision(): Promise<ContractRevisionCurrentResponse> {
+  return apiFetch<ContractRevisionCurrentResponse>(
+    `${BASE}/invitations/attachment-data-contract-revision`,
+  );
 }
 
 export async function getInvitationHistory(params?: {
@@ -71,5 +81,12 @@ export async function getInvitationHistory(params?: {
   if (params?.offset != null) q.set("offset", String(params.offset));
   const suffix = q.toString() ? `?${q.toString()}` : "";
   return apiFetch<InvitationHistoryItem[]>(`${BASE}/invitations/history${suffix}`);
+}
+
+/** 발송 취소: 초대 `status` → revoked, 공개 링크·토큰 무효 */
+export async function postRevokeInvitation(invitationId: number): Promise<{ id: number; status: string }> {
+  return apiFetch<{ id: number; status: string }>(`${BASE}/invitations/${invitationId}/revoke`, {
+    method: "POST",
+  });
 }
 

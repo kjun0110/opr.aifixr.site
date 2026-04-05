@@ -4,6 +4,9 @@ import { PATH_AUTH_OPR_GOOGLE_LINK_START } from "./paths";
 /** OAuth 완료 후 돌아올 경로 (sessionStorage) */
 export const OPR_GOOGLE_LINK_RETURN_STORAGE_KEY = "aifix_opr_google_link_return";
 
+/** Gmail 미연동(428) 직전 — 연동 후 자동 재발송할 초대 페이로드 배열 (JSON) */
+export const OPR_PENDING_INVITE_SEND_STORAGE_KEY = "aifix_pending_opr_invite_send";
+
 /** 초대 모달이 있는 페이지로 복귀 + 모달 자동 오픈용 쿼리 */
 const TIER1_INVITE_REOPEN_QUERY = "tier1Invite=1";
 

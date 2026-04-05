@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { ChevronRight, ChevronDown, Download, CheckCircle, Clock, AlertTriangle, FileText, Network, TrendingUp, Play, Info, X, Calculator, History, Eye } from 'lucide-react';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
@@ -9,7 +9,11 @@ import MonthPicker from './MonthPicker';
 import { useMode } from '../context/ModeContext';
 import { apiFetch, restoreOprSessionFromCookie } from '@/lib/api/client';
 import { getOprAccessToken } from '@/lib/api/sessionAccessToken';
-import { getOprBomPeriod } from '@/lib/api/dataMgmtOpr';
+import {
+  getOprBomPeriod,
+  getOprPcfReadiness,
+  type OprPcfReadinessResponse,
+} from '@/lib/api/dataMgmtOpr';
 
 /** 데이터 관리(DataView)와 동일: 공급망 API로 고객→지사→제품→세부제품 스캐폴드 */
 type ScaffoldVariantRow = {
@@ -26,6 +30,14 @@ type ScaffoldVariantRow = {
   variantName: string;
   variantCode: string | null;
 };
+
+/** 이름과 코드가 같으면 한 번만 표시 (예: prodA_var1 | prodA_var1 방지) */
+function formatVariantLabel(name: string, code: string | null | undefined): string {
+  const n = (name || '').trim();
+  const c = (code || '').trim();
+  if (c && c !== n) return `${n} | ${c}`;
+  return n || c || '—';
+}
 
 function parseIsoToYearMonth(iso: string): { y: number; m: number } {
   const d = new Date(iso);
@@ -48,6 +60,67 @@ function enumerateMonthsBetweenYm(startYm: string, endYm: string): string[] {
     }
   }
   return out;
+}
+
+/** 달력 기준 직전 달 (예: 4월 → 3월), `YYYY-MM` */
+function getPreviousCalendarMonthYm(base: Date = new Date()): string {
+  const y = base.getFullYear();
+  const monthIndex = base.getMonth(); // 0..11
+  const d = new Date(y, monthIndex - 1, 1);
+  const py = d.getFullYear();
+  const pm = d.getMonth() + 1;
+  return `${py}-${String(pm).padStart(2, '0')}`;
+}
+
+/** 프로젝트 허용 월 중 기본값: 전월이 있으면 전월, 없으면 전월 이하 최신 허용월, 그것도 없으면 기간 내 첫 달 */
+function pickDefaultPeriodMonth(enabled: string[]): string | null {
+  if (enabled.length === 0) return null;
+  const sorted = [...enabled].sort();
+  const prev = getPreviousCalendarMonthYm();
+  if (sorted.includes(prev)) return prev;
+  const notAfterPrev = sorted.filter((m) => m <= prev);
+  if (notAfterPrev.length > 0) return notAfterPrev[notAfterPrev.length - 1];
+  return sorted[0];
+}
+
+/** 세부제품×조회월별 PCF 실행 단계(브라우저 저장 — 추후 서버 산정 이력 API로 대체 가능) */
+const PCF_MONTH_RUN_KEY = 'aifix_pcf_month_run_state_v1';
+
+function pcfMonthRunKey(variantId: number, ym: string): string {
+  return `${variantId}|${ym}`;
+}
+
+function readMonthRunState(variantId: number, ym: string): { partial: boolean; final: boolean } {
+  if (typeof window === 'undefined') return { partial: false, final: false };
+  try {
+    const raw = localStorage.getItem(PCF_MONTH_RUN_KEY);
+    const o = raw
+      ? (JSON.parse(raw) as Record<string, { partial?: boolean; final?: boolean }>)
+      : {};
+    const r = o[pcfMonthRunKey(variantId, ym)];
+    return { partial: !!r?.partial, final: !!r?.final };
+  } catch {
+    return { partial: false, final: false };
+  }
+}
+
+function writeMonthRunState(
+  variantId: number,
+  ym: string,
+  patch: Partial<{ partial: boolean; final: boolean }>,
+): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const raw = localStorage.getItem(PCF_MONTH_RUN_KEY);
+    const o = raw
+      ? (JSON.parse(raw) as Record<string, { partial?: boolean; final?: boolean }>)
+      : {};
+    const k = pcfMonthRunKey(variantId, ym);
+    o[k] = { ...o[k], ...patch };
+    localStorage.setItem(PCF_MONTH_RUN_KEY, JSON.stringify(o));
+  } catch {
+    /* ignore */
+  }
 }
 
 function monthsFromProjectIso(startIso: string, endIso: string): string[] {
@@ -383,6 +456,8 @@ export default function PcfCalculation() {
   const [selectedProduct, setSelectedProduct] = useState<string>('');
   const [selectedDetailProduct, setSelectedDetailProduct] = useState<string>('');
   const [selectedMonth, setSelectedMonth] = useState<string | null>(null);
+  const lastDetailForMonthRef = useRef<string>('');
+  const monthUserClearedRef = useRef(false);
 
   useEffect(() => {
     let mounted = true;
@@ -599,6 +674,28 @@ export default function PcfCalculation() {
     return monthsFromProjectIso(selectedDetailMeta.projectStartIso, selectedDetailMeta.projectEndIso);
   }, [bomPeriodBrief, selectedDetailMeta]);
 
+  useEffect(() => {
+    if (!selectedDetailProduct) {
+      setSelectedMonth(null);
+      lastDetailForMonthRef.current = '';
+      monthUserClearedRef.current = false;
+      return;
+    }
+    if (projectPeriodMonths.length === 0) return;
+    const detailChanged = lastDetailForMonthRef.current !== selectedDetailProduct;
+    if (detailChanged) {
+      lastDetailForMonthRef.current = selectedDetailProduct;
+      monthUserClearedRef.current = false;
+      setSelectedMonth(pickDefaultPeriodMonth(projectPeriodMonths));
+      return;
+    }
+    setSelectedMonth((cur) => {
+      if (cur != null && projectPeriodMonths.includes(cur)) return cur;
+      if (monthUserClearedRef.current && cur === null) return null;
+      return pickDefaultPeriodMonth(projectPeriodMonths);
+    });
+  }, [selectedDetailProduct, projectPeriodMonths]);
+
   const selectionSummaryText = useMemo(() => {
     const cn =
       customerOptions.find((c) => String(c.id) === selectedCustomer)?.name ?? '';
@@ -607,9 +704,7 @@ export default function PcfCalculation() {
     const pn =
       productOptions.find((p) => String(p.id) === selectedProduct)?.name ?? '';
     const dn = selectedDetailMeta
-      ? selectedDetailMeta.variantCode
-        ? `${selectedDetailMeta.variantName} | ${selectedDetailMeta.variantCode}`
-        : selectedDetailMeta.variantName
+      ? formatVariantLabel(selectedDetailMeta.variantName, selectedDetailMeta.variantCode)
       : '';
     const bom = displayBomCode || '-';
     return [cn, bn, pn, dn, bom, selectedMonth].filter(Boolean).join(' / ');
@@ -625,37 +720,10 @@ export default function PcfCalculation() {
     selectedMonth,
   ]);
 
-  // 데이터 준비 상태 (시뮬레이션)
-  const [dataScenario, setDataScenario] = useState<'primary_only' | 'complete'>('primary_only');
-  
-  const getDataStatus = () => {
-    switch (dataScenario) {
-      case 'primary_only':
-        return {
-          primaryDataComplete: true,
-          supplierDataComplete: 8,
-          supplierDataTotal: 12,
-          missingSuppliers: 4,
-        };
-      case 'complete':
-        return {
-          primaryDataComplete: true,
-          supplierDataComplete: 12,
-          supplierDataTotal: 12,
-          missingSuppliers: 0,
-        };
-      default:
-        return {
-          primaryDataComplete: true,
-          supplierDataComplete: 12,
-          supplierDataTotal: 12,
-          missingSuppliers: 0,
-        };
-    }
-  };
+  const [pcfReadiness, setPcfReadiness] = useState<OprPcfReadinessResponse | null>(null);
+  const [pcfReadinessLoading, setPcfReadinessLoading] = useState(false);
+  const [monthRunState, setMonthRunState] = useState({ partial: false, final: false });
 
-  const dataStatus = getDataStatus();
-  const { primaryDataComplete, supplierDataComplete, supplierDataTotal, missingSuppliers } = dataStatus;
   const isTargetSelectionComplete =
     selectedCustomer !== '' &&
     selectedBranch !== '' &&
@@ -664,19 +732,68 @@ export default function PcfCalculation() {
     selectedMonth != null &&
     projectPeriodMonths.includes(selectedMonth);
 
-  // 부분산정/최종산정 가능 여부
-  const canPartialCalculate = 
+  useEffect(() => {
+    if (!selectedDetailProduct || !selectedMonth) {
+      setMonthRunState({ partial: false, final: false });
+      return;
+    }
+    const vid = Number(selectedDetailProduct);
+    if (!Number.isFinite(vid)) return;
+    setMonthRunState(readMonthRunState(vid, selectedMonth));
+  }, [selectedDetailProduct, selectedMonth]);
+
+  useEffect(() => {
+    if (!isTargetSelectionComplete || !selectedBranch || !selectedDetailProduct || !selectedMonth) {
+      setPcfReadiness(null);
+      return;
+    }
+    const branchId = Number(selectedBranch);
+    const vid = Number(selectedDetailProduct);
+    const parts = selectedMonth.split('-');
+    const ry = parseInt(parts[0] ?? '', 10);
+    const rm = parseInt(parts[1] ?? '', 10);
+    if (!Number.isFinite(branchId) || !Number.isFinite(vid) || !ry || !rm) return;
+    let cancelled = false;
+    void (async () => {
+      setPcfReadinessLoading(true);
+      try {
+        if (typeof window !== 'undefined' && !getOprAccessToken()) {
+          await restoreOprSessionFromCookie();
+        }
+        const r = await getOprPcfReadiness(vid, ry, rm, branchId);
+        if (!cancelled) setPcfReadiness(r);
+      } catch (e) {
+        if (!cancelled) {
+          setPcfReadiness(null);
+          toast.error(e instanceof Error ? e.message : 'PCF 준비도를 불러오지 못했습니다.');
+        }
+      } finally {
+        if (!cancelled) setPcfReadinessLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isTargetSelectionComplete, selectedBranch, selectedDetailProduct, selectedMonth]);
+
+  const primaryDataComplete = pcfReadiness?.operator_data_ready ?? false;
+  const supplierDataComplete = pcfReadiness?.supplier_submitted ?? 0;
+  const supplierDataTotal = pcfReadiness?.supplier_total ?? 0;
+  const missingSuppliers = Math.max(0, supplierDataTotal - supplierDataComplete);
+  const allSuppliersReady = pcfReadiness?.all_suppliers_submitted ?? false;
+
+  // 부분산정/최종산정 가능 여부 (실제 산정 엔진은 추후 연동)
+  const canPartialCalculate =
     selectedCustomer !== '' &&
     selectedBranch !== '' &&
     selectedProduct !== '' &&
     selectedDetailProduct !== '' &&
     selectedMonth != null &&
     projectPeriodMonths.includes(selectedMonth) &&
+    !pcfReadinessLoading &&
     primaryDataComplete;
 
-  const canFinalCalculate = 
-    canPartialCalculate &&
-    supplierDataComplete === supplierDataTotal;
+  const canFinalCalculate = canPartialCalculate && allSuppliersReady;
 
   // 계산 결과 표시 상태
   const [showResult, setShowResult] = useState(false);
@@ -745,6 +862,11 @@ export default function PcfCalculation() {
       toast.error('부분산정 조건이 충족되지 않았습니다');
       return;
     }
+    const vid = Number(selectedDetailProduct);
+    if (Number.isFinite(vid) && selectedMonth) {
+      writeMonthRunState(vid, selectedMonth, { partial: true });
+      setMonthRunState(readMonthRunState(vid, selectedMonth));
+    }
     setCurrentResult('partial');
     setShowResult(true);
     toast.success('부분산정을 실행합니다 (자사 데이터만 반영)');
@@ -755,6 +877,11 @@ export default function PcfCalculation() {
     if (!canFinalCalculate) {
       toast.error('최종산정 조건이 충족되지 않았습니다');
       return;
+    }
+    const vid = Number(selectedDetailProduct);
+    if (Number.isFinite(vid) && selectedMonth) {
+      writeMonthRunState(vid, selectedMonth, { partial: true, final: true });
+      setMonthRunState(readMonthRunState(vid, selectedMonth));
     }
     setCurrentResult('final');
     setShowResult(true);
@@ -1348,14 +1475,13 @@ export default function PcfCalculation() {
                   disabled={!selectedProduct || scaffoldLoading}
                   onChange={(e) => {
                     setSelectedDetailProduct(e.target.value);
-                    setSelectedMonth(null);
                   }}
                   className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5B3BFA] disabled:bg-gray-100"
                 >
                   <option value="">세부제품을 선택하세요</option>
                   {detailProductOptions.map((d) => (
                     <option key={d.variantId} value={String(d.variantId)}>
-                      {d.variantCode ? `${d.variantName} | ${d.variantCode}` : d.variantName}
+                      {formatVariantLabel(d.variantName, d.variantCode)}
                     </option>
                   ))}
                 </select>
@@ -1374,7 +1500,11 @@ export default function PcfCalculation() {
                 </label>
                 <MonthPicker
                   selectedMonth={selectedMonth}
-                  onChange={setSelectedMonth}
+                  onChange={(v) => {
+                    if (v === null) monthUserClearedRef.current = true;
+                    else monthUserClearedRef.current = false;
+                    setSelectedMonth(v);
+                  }}
                   placeholder="세부제품 선택 후 선택 가능"
                   enabledMonths={projectPeriodMonths}
                   disabled={!selectedDetailProduct}
@@ -1405,6 +1535,20 @@ export default function PcfCalculation() {
               <h3 className="font-bold">PCF 산정 준비 상태</h3>
             </div>
 
+            {isTargetSelectionComplete && (
+              <div className="mb-4 rounded-xl border border-gray-200 bg-white/80 px-4 py-3 text-sm text-gray-700">
+                <span className="font-semibold text-gray-800">이번 달 산정 단계</span>
+                <span className="mx-2 text-gray-400">·</span>
+                {monthRunState.final ? (
+                  <span className="font-bold text-green-700">최종 산정 완료 (로컬 기록)</span>
+                ) : monthRunState.partial ? (
+                  <span className="font-bold text-orange-700">부분 산정 완료 · 최종 미실행 (로컬 기록)</span>
+                ) : (
+                  <span className="text-gray-600">산정 전</span>
+                )}
+              </div>
+            )}
+
             {!isTargetSelectionComplete ? (
               <div className="bg-white/70 p-4 rounded-lg border border-blue-100 text-sm text-gray-600">
                 산정 대상(고객사, 세부지사, 제품, 세부제품, BOM Code, 기간)을 모두 선택하면 준비 상태가 표시됩니다.
@@ -1415,7 +1559,9 @@ export default function PcfCalculation() {
               <div className="bg-white/70 p-4 rounded-lg">
                 <div className="text-xs text-gray-600 mb-2">자사 데이터 준비 여부</div>
                 <div className="flex items-center gap-2">
-                  {primaryDataComplete ? (
+                  {pcfReadinessLoading ? (
+                    <span className="font-bold text-gray-400">불러오는 중…</span>
+                  ) : primaryDataComplete ? (
                     <>
                       <CheckCircle className="w-5 h-5 text-green-600" />
                       <span className="font-bold text-green-600">준비 완료</span>
@@ -1427,16 +1573,25 @@ export default function PcfCalculation() {
                     </>
                   )}
                 </div>
+                {!pcfReadinessLoading && pcfReadiness && !primaryDataComplete && (
+                  <p className="mt-2 text-xs text-gray-500">
+                    데이터 관리 Tier0(자재·에너지·생산) 또는 공정활동 행이 있어야 합니다.
+                  </p>
+                )}
               </div>
 
               <div className="bg-white/70 p-4 rounded-lg">
                 <div className="text-xs text-gray-600 mb-2">하위 협력사 데이터 제출 현황</div>
                 <div className="flex items-center gap-2">
-                  {supplierDataComplete === supplierDataTotal ? (
+                  {pcfReadinessLoading ? (
+                    <span className="font-bold text-gray-400">불러오는 중…</span>
+                  ) : allSuppliersReady ? (
                     <>
                       <CheckCircle className="w-5 h-5 text-green-600" />
                       <span className="font-bold text-green-600">
-                        {supplierDataComplete} / {supplierDataTotal}
+                        {supplierDataTotal === 0
+                          ? '대상 없음'
+                          : `${supplierDataComplete} / ${supplierDataTotal}`}
                       </span>
                     </>
                   ) : (
@@ -1448,6 +1603,11 @@ export default function PcfCalculation() {
                     </>
                   )}
                 </div>
+                {!pcfReadinessLoading && supplierDataTotal === 0 && (
+                  <p className="mt-2 text-xs text-gray-500">
+                    원청 승인이 완료된 하위 협력사 노드가 없으면 제출 현황은 0/0이며, 최종 산정도 바로 가능합니다.
+                  </p>
+                )}
               </div>
 
               <div className="bg-white/70 p-4 rounded-lg">
@@ -1488,10 +1648,12 @@ export default function PcfCalculation() {
             <div className="bg-white/70 p-4 rounded-lg mb-4">
               <div className="text-xs text-gray-600 mb-2">미입력 협력사 수</div>
               <div className="flex items-center justify-between">
-                <span className="font-bold text-red-700 text-lg">{missingSuppliers}곳</span>
+                <span className="font-bold text-red-700 text-lg">
+                  {pcfReadinessLoading ? '—' : `${missingSuppliers}곳`}
+                </span>
                 <button
                   onClick={handleRequestMissingSuppliers}
-                  disabled={missingSuppliers === 0}
+                  disabled={pcfReadinessLoading || missingSuppliers === 0}
                   className="px-3 py-1.5 text-xs border border-[#00B4FF] text-[#00B4FF] rounded-lg hover:bg-blue-50 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   미입력 협력사 요청
@@ -1499,29 +1661,15 @@ export default function PcfCalculation() {
               </div>
             </div>
 
-            {/* 테스트용 시나리오 전환 버튼 */}
-            <div className="flex gap-2 justify-end">
-              <button
-                onClick={() => setDataScenario('primary_only')}
-                className={`px-3 py-1.5 text-xs rounded ${
-                  dataScenario === 'primary_only'
-                    ? 'bg-orange-100 text-orange-700 border border-orange-300'
-                    : 'bg-gray-100 text-gray-600 border border-gray-300'
-                }`}
-              >
-                자사만 준비
-              </button>
-              <button
-                onClick={() => setDataScenario('complete')}
-                className={`px-3 py-1.5 text-xs rounded ${
-                  dataScenario === 'complete'
-                    ? 'bg-green-100 text-green-700 border border-green-300'
-                    : 'bg-gray-100 text-gray-600 border border-gray-300'
-                }`}
-              >
-                전체 준비
-              </button>
-            </div>
+            {!pcfReadinessLoading &&
+              allSuppliersReady &&
+              supplierDataTotal > 0 &&
+              primaryDataComplete && (
+                <div className="mb-4 rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-900">
+                  하위 협력사 데이터 제출이 모두 완료되어 <strong>전체 준비</strong> 상태입니다. 최종 PCF 산정을
+                  실행할 수 있습니다.
+                </div>
+              )}
               </>
             )}
           </div>

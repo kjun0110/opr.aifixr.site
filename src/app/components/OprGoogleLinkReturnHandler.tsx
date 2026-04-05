@@ -3,7 +3,10 @@
 import { useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { OPR_GOOGLE_LINK_RETURN_STORAGE_KEY } from "@/lib/api/oprGoogleLink";
+import {
+  OPR_GOOGLE_LINK_RETURN_STORAGE_KEY,
+  OPR_PENDING_INVITE_SEND_STORAGE_KEY,
+} from "@/lib/api/oprGoogleLink";
 
 /** 저장된 복귀 경로가 없을 때 — 초대 모달이 있는 공급망 화면 */
 const OPR_GOOGLE_LINK_FALLBACK_RETURN = "/dashboard/project-supply-chain?tier1Invite=1";
@@ -25,7 +28,12 @@ export function OprGoogleLinkReturnHandler() {
     const ret = sessionStorage.getItem(OPR_GOOGLE_LINK_RETURN_STORAGE_KEY);
     sessionStorage.removeItem(OPR_GOOGLE_LINK_RETURN_STORAGE_KEY);
 
-    toast.success("Google 계정 연동이 완료되었습니다. 초대 메일을 다시 발송해 주세요.");
+    const pendingInvite = sessionStorage.getItem(OPR_PENDING_INVITE_SEND_STORAGE_KEY);
+    toast.success(
+      pendingInvite?.trim()
+        ? "Google 계정 연동이 완료되었습니다. 잠시 후 초대 메일을 자동 발송합니다."
+        : "Google 계정 연동이 완료되었습니다.",
+    );
 
     if (ret && ret.startsWith("/")) {
       router.replace(ret);
