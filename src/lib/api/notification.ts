@@ -12,6 +12,8 @@ export type NotificationItemOut = {
   read_at: string | null;
   invitation_id: number | null;
   signup_request_id: number | null;
+  /** sup_signup_requests.status (목록 조회 시 조인; 일부 엔드포인트에서는 생략 가능) */
+  signup_request_status?: string | null;
   sup_data_submission_id: number | null;
   reference_type: string | null;
   reference_id: string | null;

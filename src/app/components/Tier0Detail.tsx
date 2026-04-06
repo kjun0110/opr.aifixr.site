@@ -18,6 +18,7 @@ import {
   type OprTier0MaterialRowApi,
   type OprTier0ProductionRowApi,
   type OprTier0RowContextResponse,
+  type OprTier0TransportRowApi,
   type OprTier0WorkplaceContactRowApi,
 } from '@/lib/api/dataMgmtOpr';
 import { getOprDataViewContacts, type OprDataViewContactRow } from '@/lib/api/iamOpr';
@@ -35,6 +36,7 @@ import {
   Save,
   ChevronDown,
   X,
+  MapPin,
   TableProperties,
 } from 'lucide-react';
 import { EprCo2eFactorPickerModal } from './EprCo2eFactorPickerModal';
@@ -546,7 +548,7 @@ export default function Tier0Detail() {
   const [tier0ImportBusy, setTier0ImportBusy] = useState(false);
   const tier0ExcelFileInputRef = useRef<HTMLInputElement>(null);
   const [eprPickerTarget, setEprPickerTarget] = useState<{
-    kind: 'material' | 'energy';
+    kind: 'material' | 'mineral' | 'energy' | 'production' | 'transport';
     rowIndex: number;
   } | null>(null);
   const [editableSiteManagers, setEditableSiteManagers] = useState<
@@ -585,6 +587,7 @@ export default function Tier0Detail() {
       materialEmissionFactorUnit: string;
       mineralType: string;
       mineralAmount: number;
+      mineralAmountUnit: string;
       mineralOrigin: string;
       mineralEmissionFactor: number;
       mineralEmissionFactorUnit: string;
@@ -592,6 +595,7 @@ export default function Tier0Detail() {
   >([]);
 
   const [editableProductionRows, setEditableProductionRows] = useState<any[]>([]);
+  const [editableTransportRows, setEditableTransportRows] = useState<any[]>([]);
 
   const [siteManagerEditCell, setSiteManagerEditCell] = useState<{
     rowIndex: number;
@@ -612,6 +616,11 @@ export default function Tier0Detail() {
   } | null>(null);
 
   const [productionEditCell, setProductionEditCell] = useState<{
+    rowIndex: number;
+    field: string;
+    snapshot: any;
+  } | null>(null);
+  const [transportEditCell, setTransportEditCell] = useState<{
     rowIndex: number;
     field: string;
     snapshot: any;
@@ -953,6 +962,7 @@ export default function Tier0Detail() {
     { id: 5, name: '자재 정보' },
     { id: 6, name: '에너지 정보' },
     { id: 7, name: '생산 정보' },
+    { id: 10, name: '운송 정보' },
   ];
 
   const tier0ExcelSheetTabIds: number[] = [1, 2, 3, 8, 4, 5, 6, 7];
@@ -963,7 +973,7 @@ export default function Tier0Detail() {
   ];
 
   // 구매 직무: 전체 탭 잠금
-  // ESG 직무: 앞 3개(사업장/담당자/설비) 인터페이스 조회 전용 잠금, 탭 4~7만 수정 가능
+  // ESG 직무: 앞 3개(사업장/담당자/설비) 인터페이스 조회 전용 잠금, 탭 4+ 수정 가능
   const isTabEditable = (tabId: number) => {
     if (mode === 'procurement') return false;
     return tabId >= 4;
@@ -1005,7 +1015,6 @@ export default function Tier0Detail() {
       ].filter(Boolean),
     ),
   );
-  const mineralOriginOptions = Array.from(new Set((company.siteInfo ?? []).map((s) => s.country).filter(Boolean)));
   /** 투입 자재명 제안: DB `opr_supply_contracts`(데이터뷰) 또는 mock `tier1Contract`; 검색·신규 추가는 동일 */
   const materialNameTier1ContractOptions = useMemo(() => {
     if (isDataViewTier0Card && tier0RowFetched) {
@@ -1025,12 +1034,26 @@ export default function Tier0Detail() {
     tier0RowContext?.tier1_contract_supplied_item_names,
     company.materialInfo,
   ]);
-  const unitBaseOptions = ['kg', 'g', 'ton', 'EA', 'm3', 'L'];
+  const deliveryAndInputUnitBaseOptions = ['kg', 'g', 'ton', 'ton.km', 'm³', 'm²', 'MJ', 'kWh', 'EA'];
   const mineralTypeBaseOptions = ['리튬', '니켈', '코발트', '망간', '흑연'];
   const energyTypeBaseOptions = ['전기', '스팀', 'LNG', '경유', '수소'];
+  const transportModeBaseOptions = ['육운', '해운', '항공', '철도'];
   const materialEfUnitBaseOptions = ['kgCO2e/kg', 'kgCO2e/ton', 'kgCO2e/L', 'kgCO2e/Nm3'];
   const mineralEfUnitBaseOptions = ['kgCO2e/kg', 'kgCO2e/ton'];
   const energyEfUnitBaseOptions = ['kgCO2e/kWh', 'kgCO2e/MJ', 'kgCO2e/Nm3', 'kgCO2e/L'];
+  const transportQtyUnitBaseOptions = ['kg', 'ton', 'ton.km', 'kg.km'];
+  const transportEfUnitBaseOptions = ['kgCO2e/ton.km', 'kgCO2e/kg.km', 'kgCO2e/ton', 'kgCO2e/kg'];
+  const inferFactorUnitByAmountUnit = (unitRaw: string): string => {
+    const unit = unitRaw.trim().toLowerCase();
+    if (!unit) return '';
+    if (unit === 'kg' || unit === 'g') return 'kgCO2e/kg';
+    if (unit === 'ton' || unit === 't') return 'kgCO2e/ton';
+    if (unit === 'l') return 'kgCO2e/L';
+    if (unit === 'kwh') return 'kgCO2e/kWh';
+    if (unit === 'mj' || unit === 'gj') return 'kgCO2e/MJ';
+    if (unit === 'm3' || unit === 'm³' || unit === 'nm3' || unit === 'nm³') return 'kgCO2e/Nm3';
+    return '';
+  };
 
   function SearchableSelectStrict({
     value,
@@ -1173,6 +1196,208 @@ export default function Tier0Detail() {
           <ChevronDown className="h-4 w-4 shrink-0 opacity-60" />
         </button>
         {menu}
+      </div>
+    );
+  }
+
+  function SearchableCountrySelect({
+    value,
+    onChange,
+    placeholder = '국가 검색',
+    emptyLabel = '선택',
+  }: {
+    value: string;
+    onChange: (v: string) => void;
+    placeholder?: string;
+    emptyLabel?: string;
+  }) {
+    const entries = useMemo(() => {
+      try {
+        if (typeof Intl !== 'undefined' && typeof Intl.DisplayNames !== 'undefined') {
+          const dn = new Intl.DisplayNames(['ko'], { type: 'region' });
+          const list: Array<{ code: string; nameKo: string }> = [];
+          for (let i = 0; i < 26; i++) {
+            for (let j = 0; j < 26; j++) {
+              const code = String.fromCharCode(65 + i) + String.fromCharCode(65 + j);
+              const name = dn.of(code);
+              if (name && name !== code) list.push({ code, nameKo: name });
+            }
+          }
+          return list.sort((a, b) => a.nameKo.localeCompare(b.nameKo, 'ko'));
+        }
+      } catch {
+        // ignore and use fallback
+      }
+      return [
+        { code: 'KR', nameKo: '대한민국' },
+        { code: 'US', nameKo: '미국' },
+        { code: 'CN', nameKo: '중국' },
+        { code: 'JP', nameKo: '일본' },
+        { code: 'DE', nameKo: '독일' },
+        { code: 'VN', nameKo: '베트남' },
+        { code: 'HU', nameKo: '헝가리' },
+        { code: 'FR', nameKo: '프랑스' },
+        { code: 'GB', nameKo: '영국' },
+        { code: 'AU', nameKo: '호주' },
+      ];
+    }, []);
+
+    const selectedEntry = useMemo(() => {
+      const v = value.trim();
+      if (!v) return null;
+      const byCode = entries.find((e) => e.code === v.toUpperCase());
+      if (byCode) return byCode;
+      const byName = entries.find((e) => e.nameKo === v);
+      if (byName) return byName;
+      return null;
+    }, [entries, value]);
+
+    const [open, setOpen] = useState(false);
+    const [q, setQ] = useState('');
+    const searchInputRef = useRef<HTMLInputElement>(null);
+
+    useEffect(() => {
+      if (!open) return;
+      const id = requestAnimationFrame(() => {
+        searchInputRef.current?.focus({ preventScroll: true });
+      });
+      return () => cancelAnimationFrame(id);
+    }, [open]);
+
+    useEffect(() => {
+      if (!open) return;
+      const onKey = (e: KeyboardEvent) => {
+        if (e.key === 'Escape') {
+          setOpen(false);
+          setQ('');
+        }
+      };
+      window.addEventListener('keydown', onKey);
+      return () => window.removeEventListener('keydown', onKey);
+    }, [open]);
+
+    const filtered = useMemo(() => {
+      const s = q.trim().toLowerCase();
+      if (!s) return entries;
+      return entries.filter(
+        (e) => e.nameKo.toLowerCase().includes(s) || e.code.toLowerCase().includes(s),
+      );
+    }, [entries, q]);
+
+    const close = () => {
+      setOpen(false);
+      setQ('');
+    };
+
+    return (
+      <div className="relative min-w-0 max-w-full">
+        <button
+          type="button"
+          onClick={() => {
+            setQ('');
+            setOpen(true);
+          }}
+          className={SUP_DETAIL_COMBO_TRIGGER}
+        >
+          <span className="min-w-0 flex-1 truncate">
+            {selectedEntry ? (
+              <>
+                <span>{selectedEntry.nameKo}</span>
+                <span className="ml-1 text-xs text-gray-500">({selectedEntry.code})</span>
+              </>
+            ) : (
+              value.trim() || emptyLabel
+            )}
+          </span>
+          <MapPin className="h-4 w-4 shrink-0 opacity-60" aria-hidden />
+        </button>
+        {open && (
+          <div
+            className="fixed inset-0 z-[320] flex items-center justify-center bg-black/50 p-4"
+            role="presentation"
+            onClick={close}
+          >
+            <div
+              className="flex max-h-[min(32rem,85vh)] w-full max-w-lg min-h-0 flex-col overflow-hidden rounded-2xl bg-white shadow-xl"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="tier0-country-picker-title"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between border-b border-gray-200 px-5 py-4">
+                <div className="flex min-w-0 items-center gap-2">
+                  <MapPin className="h-5 w-5 shrink-0 text-[#5B3BFA]" aria-hidden />
+                  <h2 id="tier0-country-picker-title" className="truncate text-lg font-bold text-gray-900">
+                    국가 선택
+                  </h2>
+                </div>
+                <button
+                  type="button"
+                  className="rounded-md p-1.5 text-gray-500 hover:bg-gray-100"
+                  onClick={close}
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              <div className="border-b border-gray-200 px-5 py-3">
+                <input
+                  ref={searchInputRef}
+                  type="text"
+                  value={q}
+                  onChange={(e) => setQ(e.target.value)}
+                  placeholder={placeholder}
+                  className="box-border w-full rounded-md border border-gray-300 px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-[var(--aifix-primary)]"
+                />
+                <p className="mt-2 text-xs text-gray-500">
+                  국가명(한글) 또는 ISO 코드로 검색합니다. 선택 시 저장값은 국가명으로 입력됩니다.
+                </p>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto">
+                <ul className="py-1">
+                  <li>
+                    <button
+                      type="button"
+                      className="w-full px-4 py-2 text-left text-sm text-gray-500 hover:bg-gray-50"
+                      onClick={() => {
+                        onChange('');
+                        close();
+                      }}
+                    >
+                      {emptyLabel}
+                    </button>
+                  </li>
+                  {filtered.map((e) => (
+                    <li key={e.code}>
+                      <button
+                        type="button"
+                        className="w-full px-4 py-2 text-left text-sm text-[var(--aifix-navy)] hover:bg-violet-50"
+                        onClick={() => {
+                          onChange(e.nameKo);
+                          close();
+                        }}
+                      >
+                        <span>{e.nameKo}</span>
+                        <span className="ml-1 text-xs text-gray-500">({e.code})</span>
+                      </button>
+                    </li>
+                  ))}
+                  {filtered.length === 0 && (
+                    <li className="px-4 py-3 text-xs text-gray-400">검색 결과 없음</li>
+                  )}
+                </ul>
+              </div>
+              <div className="border-t border-gray-200 px-5 py-3 text-right">
+                <button
+                  type="button"
+                  className="rounded-md border border-gray-300 px-4 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
+                  onClick={close}
+                >
+                  닫기
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -1365,6 +1590,7 @@ export default function Tier0Detail() {
     productionAmount: 0,
     productionUnit: PRODUCTION_QTY_UNIT,
     wasteAmount: 0,
+    wasteAmountUnit: '',
     wasteEmissionFactor: 0,
     wasteEmissionFactorUnit: '',
   });
@@ -1390,6 +1616,7 @@ export default function Tier0Detail() {
     materialEmissionFactorUnit: '',
     mineralType: '',
     mineralAmount: 0,
+    mineralAmountUnit: '',
     mineralOrigin: '',
     mineralEmissionFactor: 0,
     mineralEmissionFactorUnit: '',
@@ -1404,6 +1631,20 @@ export default function Tier0Detail() {
     energyUnit: '',
     emissionFactor: 0,
     emissionFactorUnit: '',
+  });
+
+  const createEmptyTransportRow = () => ({
+    rowId: `new-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    detailProductName: company.productType ?? '',
+    originCountry: '',
+    originAddressDetail: '',
+    destinationCountry: '',
+    destinationAddressDetail: '',
+    transportMode: '',
+    transportQty: 0,
+    transportQtyUnit: '',
+    transportEmissionFactor: 0,
+    transportEmissionFactorUnit: '',
   });
 
   const mapFactoryToSiteManagers = (rows: OprTier0WorkplaceContactRowApi[]) => {
@@ -1432,6 +1673,7 @@ export default function Tier0Detail() {
       materialEmissionFactorUnit: r.material_emission_factor_unit ?? '',
       mineralType: r.mineral_type ?? '',
       mineralAmount: parseQtyCell(r.mineral_amount),
+      mineralAmountUnit: r.mineral_amount_unit ?? '',
       mineralOrigin: r.mineral_origin ?? '',
       mineralEmissionFactor: parseQtyCell(r.mineral_emission_factor),
       mineralEmissionFactorUnit: r.mineral_emission_factor_unit ?? '',
@@ -1461,8 +1703,26 @@ export default function Tier0Detail() {
       productionAmount: parseQtyCell(r.production_qty),
       productionUnit: PRODUCTION_QTY_UNIT,
       wasteAmount: parseQtyCell(r.waste_qty),
+      wasteAmountUnit: r.waste_qty_unit ?? '',
       wasteEmissionFactor: parseQtyCell(r.waste_emission_factor),
       wasteEmissionFactorUnit: r.waste_emission_factor_unit ?? '',
+    }));
+  };
+
+  const mapFactoryToTransport = (rows: OprTier0TransportRowApi[]) => {
+    if (!rows.length) return [createEmptyTransportRow()];
+    return rows.map((r) => ({
+      rowId: tier0NewRowId(),
+      detailProductName: r.detail_product_name ?? company.productType ?? '',
+      originCountry: r.origin_country ?? '',
+      originAddressDetail: r.origin_address_detail ?? '',
+      destinationCountry: r.destination_country ?? '',
+      destinationAddressDetail: r.destination_address_detail ?? '',
+      transportMode: r.transport_mode ?? '',
+      transportQty: parseQtyCell(r.transport_qty),
+      transportQtyUnit: r.transport_qty_unit ?? '',
+      transportEmissionFactor: parseQtyCell(r.transport_emission_factor),
+      transportEmissionFactorUnit: r.transport_emission_factor_unit ?? '',
     }));
   };
 
@@ -1471,21 +1731,25 @@ export default function Tier0Detail() {
     const mats = mapFactoryToMaterials(preview.materials ?? []);
     const ene = mapFactoryToEnergy(preview.energy_rows ?? []);
     const prod = mapFactoryToProduction(preview.production_rows ?? []);
+    const tr = mapFactoryToTransport(preview.transport_rows ?? []);
     if (tier0UploadMergeMode === 'overwrite') {
       setEditableSiteManagers(sm);
       setEditableMaterials(mats);
       setEditableEnergyInfo(ene);
       setEditableProductionRows(prod);
+      setEditableTransportRows(tr);
     } else {
       setEditableSiteManagers((prev) => [...prev, ...sm]);
       setEditableMaterials((prev) => [...prev, ...mats]);
       setEditableEnergyInfo((prev) => [...prev, ...ene]);
       setEditableProductionRows((prev) => [...prev, ...prod]);
+      setEditableTransportRows((prev) => [...prev, ...tr]);
     }
     setSiteManagerEditCell(null);
     setMaterialEditCell(null);
     setEnergyEditCell(null);
     setProductionEditCell(null);
+    setTransportEditCell(null);
   };
 
   useEffect(() => {
@@ -1512,7 +1776,9 @@ export default function Tier0Detail() {
     setEditableProductionRows(
       productionRows.map((r) => ({ ...r, productionUnit: PRODUCTION_QTY_UNIT })),
     );
+    setEditableTransportRows([createEmptyTransportRow()]);
     setProductionEditCell(null);
+    setTransportEditCell(null);
     setSiteManagerEditCell(null);
     setMaterialEditCell(null);
     setEnergyEditCell(null);
@@ -1543,7 +1809,9 @@ export default function Tier0Detail() {
         setEditableMaterials(mapFactoryToMaterials(data.materials ?? []));
         setEditableEnergyInfo(mapFactoryToEnergy(data.energy_rows ?? []));
         setEditableProductionRows(mapFactoryToProduction(data.production_rows ?? []));
+        setEditableTransportRows(mapFactoryToTransport(data.transport_rows ?? []));
         setProductionEditCell(null);
+        setTransportEditCell(null);
         setSiteManagerEditCell(null);
         setMaterialEditCell(null);
         setEnergyEditCell(null);
@@ -1553,6 +1821,7 @@ export default function Tier0Detail() {
           setEditableMaterials([createEmptyMaterialRow()]);
           setEditableEnergyInfo([createEmptyEnergyRow()]);
           setEditableProductionRows([createEmptyProductionRow()]);
+          setEditableTransportRows([createEmptyTransportRow()]);
         }
       }
     })();
@@ -1651,6 +1920,9 @@ export default function Tier0Detail() {
     } else if (activeTab === 7) {
       setEditableProductionRows((prev) => [...prev, createEmptyProductionRow()]);
       setProductionEditCell(null);
+    } else if (activeTab === 10) {
+      setEditableTransportRows((prev) => [...prev, createEmptyTransportRow()]);
+      setTransportEditCell(null);
     }
     toast.info('새 행을 추가합니다');
   };
@@ -1675,6 +1947,7 @@ export default function Tier0Detail() {
       material_emission_factor_unit: r.materialEmissionFactorUnit,
       mineral_type: r.mineralType,
       mineral_amount: String(r.mineralAmount ?? ''),
+      mineral_amount_unit: r.mineralAmountUnit,
       mineral_origin: r.mineralOrigin,
       mineral_emission_factor: String(r.mineralEmissionFactor ?? ''),
       mineral_emission_factor_unit: r.mineralEmissionFactorUnit,
@@ -1694,8 +1967,21 @@ export default function Tier0Detail() {
       production_qty: String(r.productionAmount ?? ''),
       production_qty_unit: PRODUCTION_QTY_UNIT,
       waste_qty: String(r.wasteAmount ?? ''),
+      waste_qty_unit: r.wasteAmountUnit,
       waste_emission_factor: String(r.wasteEmissionFactor ?? ''),
       waste_emission_factor_unit: r.wasteEmissionFactorUnit,
+    })),
+    transport_rows: editableTransportRows.map((r) => ({
+      detail_product_name: r.detailProductName ?? company.productType,
+      origin_country: r.originCountry,
+      origin_address_detail: r.originAddressDetail,
+      destination_country: r.destinationCountry,
+      destination_address_detail: r.destinationAddressDetail,
+      transport_mode: r.transportMode,
+      transport_qty: String(r.transportQty ?? ''),
+      transport_qty_unit: r.transportQtyUnit,
+      transport_emission_factor: String(r.transportEmissionFactor ?? ''),
+      transport_emission_factor_unit: r.transportEmissionFactorUnit,
     })),
   });
 
@@ -1778,6 +2064,23 @@ export default function Tier0Detail() {
       return prev.filter((_, i) => i !== rowIndex);
     });
     setProductionEditCell(null);
+  };
+
+  const handleInsertTransportRowAfter = (rowIndex: number) => {
+    setEditableTransportRows((prev) => {
+      const next = [...prev];
+      next.splice(rowIndex + 1, 0, createEmptyTransportRow());
+      return next;
+    });
+    setTransportEditCell(null);
+  };
+
+  const handleRemoveTransportRowAt = (rowIndex: number) => {
+    setEditableTransportRows((prev) => {
+      if (prev.length <= 1) return [createEmptyTransportRow()];
+      return prev.filter((_, i) => i !== rowIndex);
+    });
+    setTransportEditCell(null);
   };
 
   const handleInsertSiteManagerRowAfter = (rowIndex: number) => {
@@ -1886,6 +2189,57 @@ export default function Tier0Detail() {
                 ),
               );
               setProductionEditCell(null);
+              return;
+            }
+            if (e.key === 'Enter') {
+              (e.target as HTMLInputElement).blur();
+            }
+          }}
+          className="m-0 h-full min-h-0 w-full min-w-0 flex-1 appearance-none border-0 bg-transparent p-0 text-sm text-[var(--aifix-navy)] outline-none"
+        />
+      </div>
+    );
+  };
+
+  const renderTransportValueContent = (rowIndex: number, field: string, value: any) => {
+    if (!isTabEditable(10)) return formatProductionValue(value);
+
+    const editing =
+      transportEditCell?.rowIndex === rowIndex && transportEditCell?.field === field;
+    if (!editing) {
+      return (
+        <div className={cellShellClass} style={{ color: 'var(--aifix-navy)' }}>
+          <span
+            className="min-w-0 flex-1 cursor-default truncate"
+            onDoubleClick={() => setTransportEditCell({ rowIndex, field, snapshot: value })}
+            title="더블클릭하여 수정"
+          >
+            {formatProductionValue(value) || '\u00a0'}
+          </span>
+        </div>
+      );
+    }
+
+    const snapshot = transportEditCell?.snapshot;
+    return (
+      <div className={`${cellShellClass} outline-none ring-2 ring-inset ring-[var(--aifix-primary)]`}>
+        <input
+          autoFocus
+          value={String(value ?? '')}
+          onChange={(e) => {
+            const raw = e.target.value;
+            const nextValue = typeof value === 'number' ? Number(raw || 0) : raw;
+            setEditableTransportRows((prev) =>
+              prev.map((r, i) => (i === rowIndex ? { ...r, [field]: nextValue } : r)),
+            );
+          }}
+          onBlur={() => setTransportEditCell(null)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              setEditableTransportRows((prev) =>
+                prev.map((r, i) => (i === rowIndex ? { ...r, [field]: snapshot } : r)),
+              );
+              setTransportEditCell(null);
               return;
             }
             if (e.key === 'Enter') {
@@ -2269,6 +2623,7 @@ export default function Tier0Detail() {
                     <th className={SUP_DETAIL_TH}>자재 배출계수 단위</th>
                     <th className={SUP_DETAIL_TH}>투입 광물 종류</th>
                     <th className={SUP_DETAIL_TH}>투입 광물량</th>
+                    <th className={SUP_DETAIL_TH}>투입 광물량 단위</th>
                     <th className={SUP_DETAIL_TH}>광물 원산지</th>
                     <th className={SUP_DETAIL_TH}>광물 배출계수</th>
                     <th className={SUP_DETAIL_TH}>광물 배출계수 단위</th>
@@ -2314,10 +2669,21 @@ export default function Tier0Detail() {
                             value={row.inputAmountUnit}
                             onChange={(v) =>
                               setEditableMaterials((prev) =>
-                                prev.map((r, i) => (i === idx ? { ...r, inputAmountUnit: v } : r)),
+                                prev.map((r, i) =>
+                                  i === idx
+                                    ? {
+                                        ...r,
+                                        inputAmountUnit: v,
+                                        materialEmissionFactorUnit:
+                                          r.materialEmissionFactor > 0 && !String(r.materialEmissionFactorUnit ?? '').trim()
+                                            ? inferFactorUnitByAmountUnit(v)
+                                            : r.materialEmissionFactorUnit,
+                                      }
+                                    : r,
+                                ),
                               )
                             }
-                            baseOptions={unitBaseOptions}
+                            baseOptions={deliveryAndInputUnitBaseOptions}
                             placeholder="투입량 단위 검색·추가"
                           />
                         ) : safeValue(row.inputAmountUnit)}
@@ -2374,19 +2740,59 @@ export default function Tier0Detail() {
                       <td className={SUP_DETAIL_TD}>{renderMaterialValueContent(idx, 'mineralAmount', row.mineralAmount)}</td>
                       <td className={SUP_DETAIL_TD}>
                         {isTabEditable(5) ? (
-                          <SearchableSelectStrict
+                          <SearchableSelectCreatable
+                            value={row.mineralAmountUnit}
+                            onChange={(v) =>
+                              setEditableMaterials((prev) =>
+                                prev.map((r, i) =>
+                                  i === idx
+                                    ? {
+                                        ...r,
+                                        mineralAmountUnit: v,
+                                        mineralEmissionFactorUnit:
+                                          r.mineralEmissionFactor > 0 && !String(r.mineralEmissionFactorUnit ?? '').trim()
+                                            ? inferFactorUnitByAmountUnit(v)
+                                            : r.mineralEmissionFactorUnit,
+                                      }
+                                    : r,
+                                ),
+                              )
+                            }
+                            baseOptions={deliveryAndInputUnitBaseOptions}
+                            placeholder="투입 광물량 단위 검색·추가"
+                          />
+                        ) : safeValue(row.mineralAmountUnit)}
+                      </td>
+                      <td className={SUP_DETAIL_TD}>
+                        {isTabEditable(5) ? (
+                          <SearchableCountrySelect
                             value={row.mineralOrigin}
                             onChange={(v) =>
                               setEditableMaterials((prev) =>
                                 prev.map((r, i) => (i === idx ? { ...r, mineralOrigin: v } : r)),
                               )
                             }
-                            options={mineralOriginOptions}
                             placeholder="광물 원산지 검색"
                           />
                         ) : safeValue(row.mineralOrigin)}
                       </td>
-                      <td className={SUP_DETAIL_TD}>{renderMaterialValueContent(idx, 'mineralEmissionFactor', row.mineralEmissionFactor)}</td>
+                      <td className={SUP_DETAIL_TD}>
+                        <div className="flex min-w-0 items-center gap-1">
+                          <div className="min-w-0 flex-1">
+                            {renderMaterialValueContent(idx, 'mineralEmissionFactor', row.mineralEmissionFactor)}
+                          </div>
+                          {isTabEditable(5) && (
+                            <button
+                              type="button"
+                              title="환경성적표지 참조 계수에서 선택"
+                              className="shrink-0 rounded-md p-1 text-[#5B3BFA] hover:bg-violet-50"
+                              onClick={() => setEprPickerTarget({ kind: 'mineral', rowIndex: idx })}
+                            >
+                              <TableProperties className="h-4 w-4" />
+                            </button>
+                          )}
+                        </div>
+                      </td>
                       <td className={SUP_DETAIL_TD}>
                         {isTabEditable(5) ? (
                           <SearchableSelectCreatable
@@ -2687,7 +3093,7 @@ export default function Tier0Detail() {
                         )}
                       </td>
                       <td className={SUP_DETAIL_TD}>
-                        {isTabEditable(6) ? (
+                        {isTabEditable(6) && idx === 0 ? (
                           <SearchableSelectCreatable
                             value={row.energyType}
                             onChange={(v) =>
@@ -2698,6 +3104,24 @@ export default function Tier0Detail() {
                             baseOptions={energyTypeBaseOptions}
                             placeholder="에너지 유형 검색·추가"
                           />
+                        ) : isTabEditable(6) ? (
+                          <select
+                            value={row.energyType ?? ''}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              setEditableEnergyInfo((prev) =>
+                                prev.map((r, i) => (i === idx ? { ...r, energyType: v } : r)),
+                              );
+                            }}
+                            className="w-full px-2 py-1 border border-gray-300 rounded"
+                          >
+                            <option value="">선택</option>
+                            {energyTypeBaseOptions.map((opt) => (
+                              <option key={opt} value={opt}>
+                                {opt}
+                              </option>
+                            ))}
+                          </select>
                         ) : safeValue(row.energyType)}
                       </td>
                       <td className={SUP_DETAIL_TD}>{renderEnergyValueContent(idx, 'energyUsage', row.energyUsage)}</td>
@@ -2710,7 +3134,7 @@ export default function Tier0Detail() {
                                 prev.map((r, i) => (i === idx ? { ...r, energyUnit: v } : r)),
                               )
                             }
-                            baseOptions={unitBaseOptions}
+                            baseOptions={deliveryAndInputUnitBaseOptions}
                             placeholder="에너지 단위 검색·추가"
                           />
                         ) : safeValue(row.energyUnit)}
@@ -2834,6 +3258,7 @@ export default function Tier0Detail() {
                       <th className={SUP_DETAIL_TH}>생산량</th>
                       <th className={SUP_DETAIL_TH}>생산량 단위</th>
                       <th className={SUP_DETAIL_TH}>폐기물량</th>
+                      <th className={SUP_DETAIL_TH}>폐기물량 단위</th>
                       <th className={SUP_DETAIL_TH}>폐기물 배출계수</th>
                       <th className={SUP_DETAIL_TH}>폐기물 배출계수 단위</th>
                       {isTabEditable(7) && <th className={SUP_DETAIL_TH_ACTION}>작업</th>}
@@ -2873,7 +3298,50 @@ export default function Tier0Detail() {
                             </div>
                           </td>
                           <td className={SUP_DETAIL_TD}>{renderProductionValueContent(idx, 'wasteAmount', row.wasteAmount)}</td>
-                          <td className={SUP_DETAIL_TD}>{renderProductionValueContent(idx, 'wasteEmissionFactor', row.wasteEmissionFactor)}</td>
+                          <td className={SUP_DETAIL_TD}>
+                            {isTabEditable(7) ? (
+                              <SearchableSelectCreatable
+                                value={row.wasteAmountUnit}
+                                onChange={(v) =>
+                                  setEditableProductionRows((prev) =>
+                                    prev.map((r, i) =>
+                                      i === idx
+                                        ? {
+                                            ...r,
+                                            wasteAmountUnit: v,
+                                            wasteEmissionFactorUnit:
+                                              r.wasteEmissionFactor > 0 && !String(r.wasteEmissionFactorUnit ?? '').trim()
+                                                ? inferFactorUnitByAmountUnit(v)
+                                                : r.wasteEmissionFactorUnit,
+                                          }
+                                        : r,
+                                    ),
+                                  )
+                                }
+                                baseOptions={deliveryAndInputUnitBaseOptions}
+                                placeholder="폐기물량 단위 검색·추가"
+                              />
+                            ) : (
+                              safeValue(row.wasteAmountUnit)
+                            )}
+                          </td>
+                          <td className={SUP_DETAIL_TD}>
+                            <div className="flex min-w-0 items-center gap-1">
+                              <div className="min-w-0 flex-1">
+                                {renderProductionValueContent(idx, 'wasteEmissionFactor', row.wasteEmissionFactor)}
+                              </div>
+                              {isTabEditable(7) && (
+                                <button
+                                  type="button"
+                                  title="환경성적표지 참조 계수에서 선택"
+                                  className="shrink-0 rounded-md p-1 text-[#5B3BFA] hover:bg-violet-50"
+                                  onClick={() => setEprPickerTarget({ kind: 'production', rowIndex: idx })}
+                                >
+                                  <TableProperties className="h-4 w-4" />
+                                </button>
+                              )}
+                            </div>
+                          </td>
                           <td className={SUP_DETAIL_TD}>
                             {isTabEditable(7) ? (
                               <SearchableSelectCreatable
@@ -2920,7 +3388,7 @@ export default function Tier0Detail() {
                       ))
                     ) : (
                       <tr>
-                        <td colSpan={isTabEditable(7) ? 8 : 7} className="px-4 py-8 text-center text-gray-500">
+                        <td colSpan={isTabEditable(7) ? 9 : 8} className="px-4 py-8 text-center text-gray-500">
                           생산 정보가 없습니다.
                         </td>
                       </tr>
@@ -2928,6 +3396,209 @@ export default function Tier0Detail() {
                   </tbody>
                 </table>
               </div>
+          </div>
+        );
+
+      case 10: // 운송 정보 (Editable)
+        return (
+          <div className="flex flex-col">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2 text-sm text-gray-600">
+                {isTabEditable(10) ? (
+                  <>
+                    <FileText className="w-4 h-4" />
+                    <span>✏ Factory Input Data (수정 가능)</span>
+                  </>
+                ) : (
+                  <>
+                    <Lock className="w-4 h-4" />
+                    <span>🔗 Source : ERP / MES Interface | Data Sync : 자동 연동</span>
+                  </>
+                )}
+              </div>
+              {isTabEditable(10) && (
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleAddRow}
+                    className="px-4 py-2 text-sm text-white rounded-lg flex items-center gap-2 transition-all cursor-pointer"
+                    style={{ background: 'linear-gradient(90deg, #5B3BFA 0%, #00B4FF 100%)' }}
+                  >
+                    <Plus className="w-4 h-4" />+ 행추가
+                  </button>
+                  <button
+                    onClick={handleSave}
+                    className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors flex items-center gap-2"
+                  >
+                    <Save className="w-4 h-4" />
+                    수정 완료
+                  </button>
+                </div>
+              )}
+            </div>
+            <div className="min-h-[28rem] sm:min-h-[32rem] overflow-x-auto overflow-y-visible border border-gray-200 rounded-xl bg-white [scrollbar-gutter:stable]">
+              <table className={SUP_DETAIL_TABLE_EDITABLE}>
+                <thead>
+                  <tr>
+                    <th className={SUP_DETAIL_TH}>제품명</th>
+                    <th className={SUP_DETAIL_TH}>출발지 국가</th>
+                    <th className={SUP_DETAIL_TH}>출발지 상세 주소</th>
+                    <th className={SUP_DETAIL_TH}>도착지 국가</th>
+                    <th className={SUP_DETAIL_TH}>도착지 상세주소</th>
+                    <th className={SUP_DETAIL_TH}>운송수단</th>
+                    <th className={SUP_DETAIL_TH}>운송 물량</th>
+                    <th className={SUP_DETAIL_TH}>물량 단위</th>
+                    <th className={SUP_DETAIL_TH}>운송 배출계수</th>
+                    <th className={SUP_DETAIL_TH}>운송 배출계수 단위</th>
+                    {isTabEditable(10) && <th className={SUP_DETAIL_TH_ACTION}>작업</th>}
+                  </tr>
+                </thead>
+                <tbody>
+                  {(editableTransportRows ?? []).length > 0 ? (
+                    editableTransportRows.map((row, idx) => (
+                      <tr key={row.rowId ?? idx} className="group hover:bg-gray-50 transition-colors">
+                        <td className={SUP_DETAIL_TD}>{safeValue(row.detailProductName || detailProductName)}</td>
+                        <td className={SUP_DETAIL_TD}>
+                          {isTabEditable(10) ? (
+                            <SearchableCountrySelect
+                              value={row.originCountry ?? ''}
+                              onChange={(v) =>
+                                setEditableTransportRows((prev) =>
+                                  prev.map((r, i) => (i === idx ? { ...r, originCountry: v } : r)),
+                                )
+                              }
+                              placeholder="출발지 국가 검색"
+                            />
+                          ) : (
+                            safeValue(row.originCountry)
+                          )}
+                        </td>
+                        <td className={SUP_DETAIL_TD}>
+                          {renderTransportValueContent(idx, 'originAddressDetail', row.originAddressDetail)}
+                        </td>
+                        <td className={SUP_DETAIL_TD}>
+                          {isTabEditable(10) ? (
+                            <SearchableCountrySelect
+                              value={row.destinationCountry ?? ''}
+                              onChange={(v) =>
+                                setEditableTransportRows((prev) =>
+                                  prev.map((r, i) => (i === idx ? { ...r, destinationCountry: v } : r)),
+                                )
+                              }
+                              placeholder="도착지 국가 검색"
+                            />
+                          ) : (
+                            safeValue(row.destinationCountry)
+                          )}
+                        </td>
+                        <td className={SUP_DETAIL_TD}>
+                          {renderTransportValueContent(idx, 'destinationAddressDetail', row.destinationAddressDetail)}
+                        </td>
+                        <td className={SUP_DETAIL_TD}>
+                          {isTabEditable(10) ? (
+                            <SearchableSelectCreatable
+                              value={row.transportMode ?? ''}
+                              onChange={(v) =>
+                                setEditableTransportRows((prev) =>
+                                  prev.map((r, i) => (i === idx ? { ...r, transportMode: v } : r)),
+                                )
+                              }
+                              baseOptions={transportModeBaseOptions}
+                              placeholder="운송수단 검색·추가"
+                            />
+                          ) : (
+                            safeValue(row.transportMode)
+                          )}
+                        </td>
+                        <td className={SUP_DETAIL_TD}>
+                          {renderTransportValueContent(idx, 'transportQty', row.transportQty)}
+                        </td>
+                        <td className={SUP_DETAIL_TD}>
+                          {isTabEditable(10) ? (
+                            <SearchableSelectCreatable
+                              value={row.transportQtyUnit ?? ''}
+                              onChange={(v) =>
+                                setEditableTransportRows((prev) =>
+                                  prev.map((r, i) => (i === idx ? { ...r, transportQtyUnit: v } : r)),
+                                )
+                              }
+                              baseOptions={transportQtyUnitBaseOptions}
+                              placeholder="물량 단위 선택"
+                              allowCreate={false}
+                            />
+                          ) : (
+                            safeValue(row.transportQtyUnit)
+                          )}
+                        </td>
+                        <td className={SUP_DETAIL_TD}>
+                          <div className="flex min-w-0 items-center gap-1">
+                            <div className="min-w-0 flex-1">
+                              {renderTransportValueContent(idx, 'transportEmissionFactor', row.transportEmissionFactor)}
+                            </div>
+                            {isTabEditable(10) && (
+                              <button
+                                type="button"
+                                title="환경성적표지 참조 계수에서 선택"
+                                className="shrink-0 rounded-md p-1 text-[#5B3BFA] hover:bg-violet-50"
+                                onClick={() => setEprPickerTarget({ kind: 'transport', rowIndex: idx })}
+                              >
+                                <TableProperties className="h-4 w-4" />
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                        <td className={SUP_DETAIL_TD}>
+                          {isTabEditable(10) ? (
+                            <SearchableSelectCreatable
+                              value={row.transportEmissionFactorUnit ?? ''}
+                              onChange={(v) =>
+                                setEditableTransportRows((prev) =>
+                                  prev.map((r, i) => (i === idx ? { ...r, transportEmissionFactorUnit: v } : r)),
+                                )
+                              }
+                              baseOptions={transportEfUnitBaseOptions}
+                              placeholder="운송 배출계수 단위 선택"
+                              allowCreate={false}
+                            />
+                          ) : (
+                            safeValue(row.transportEmissionFactorUnit)
+                          )}
+                        </td>
+                        {isTabEditable(10) && (
+                          <td className={SUP_DETAIL_TD_ACTION}>
+                            <div className="flex h-8 items-center justify-center gap-0">
+                              <button
+                                type="button"
+                                onClick={() => handleInsertTransportRowAfter(idx)}
+                                className="inline-flex size-8 shrink-0 items-center justify-center rounded-md p-0 text-gray-500 hover:bg-gray-100 transition-colors"
+                                title="이 행 아래에 새 행 추가"
+                                aria-label="이 행 아래에 새 행 추가"
+                              >
+                                <Plus className="w-4 h-4" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveTransportRowAt(idx)}
+                                className="inline-flex size-8 shrink-0 items-center justify-center rounded-md p-0 text-gray-500 hover:bg-red-50 hover:text-red-600 transition-colors"
+                                title="이 행 삭제"
+                                aria-label="이 행 삭제"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </td>
+                        )}
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={isTabEditable(10) ? 11 : 10} className="px-4 py-8 text-center text-gray-500">
+                        운송 정보가 없습니다.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         );
       
@@ -3391,15 +4062,45 @@ export default function Tier0Detail() {
                   : r,
               ),
             );
-          } else {
+          } else if (t.kind === 'mineral') {
+            setEditableMaterials((prev) =>
+              prev.map((r, i) =>
+                i === t.rowIndex
+                  ? { ...r, mineralEmissionFactor: co2eFactor, mineralEmissionFactorUnit: factorUnit }
+                  : r,
+              ),
+            );
+          } else if (t.kind === 'energy') {
             setEditableEnergyInfo((prev) =>
               prev.map((r, i) =>
                 i === t.rowIndex ? { ...r, emissionFactor: co2eFactor, emissionFactorUnit: factorUnit } : r,
               ),
             );
+          } else if (t.kind === 'production') {
+            setEditableProductionRows((prev) =>
+              prev.map((r, i) =>
+                i === t.rowIndex
+                  ? { ...r, wasteEmissionFactor: co2eFactor, wasteEmissionFactorUnit: factorUnit }
+                  : r,
+              ),
+            );
+          } else {
+            setEditableTransportRows((prev) =>
+              prev.map((r, i) =>
+                i === t.rowIndex
+                  ? {
+                      ...r,
+                      transportEmissionFactor: co2eFactor,
+                      transportEmissionFactorUnit: factorUnit,
+                    }
+                  : r,
+              ),
+            );
           }
           setMaterialEditCell(null);
           setEnergyEditCell(null);
+          setProductionEditCell(null);
+          setTransportEditCell(null);
           toast.success(`배출계수 반영: ${label}`);
         }}
       />

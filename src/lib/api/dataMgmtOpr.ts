@@ -233,6 +233,7 @@ export type OprTier0MaterialRowApi = {
   material_emission_factor_unit?: string;
   mineral_type?: string;
   mineral_amount?: string;
+  mineral_amount_unit?: string;
   mineral_origin?: string;
   mineral_emission_factor?: string;
   mineral_emission_factor_unit?: string;
@@ -254,8 +255,22 @@ export type OprTier0ProductionRowApi = {
   production_qty?: string;
   production_qty_unit?: string;
   waste_qty?: string;
+  waste_qty_unit?: string;
   waste_emission_factor?: string;
   waste_emission_factor_unit?: string;
+};
+
+export type OprTier0TransportRowApi = {
+  detail_product_name?: string;
+  origin_country?: string;
+  origin_address_detail?: string;
+  destination_country?: string;
+  destination_address_detail?: string;
+  transport_mode?: string;
+  transport_qty?: string;
+  transport_qty_unit?: string;
+  transport_emission_factor?: string;
+  transport_emission_factor_unit?: string;
 };
 
 export type OprTier0FactoryDataResponse = {
@@ -264,6 +279,7 @@ export type OprTier0FactoryDataResponse = {
   materials: OprTier0MaterialRowApi[];
   energy_rows: OprTier0EnergyRowApi[];
   production_rows: OprTier0ProductionRowApi[];
+  transport_rows?: OprTier0TransportRowApi[];
 };
 
 export type OprTier0ImportPreviewResponse = OprTier0FactoryDataResponse;
@@ -273,6 +289,7 @@ export type OprTier0FactoryDataSaveRequest = {
   materials: OprTier0MaterialRowApi[];
   energy_rows: OprTier0EnergyRowApi[];
   production_rows: OprTier0ProductionRowApi[];
+  transport_rows?: OprTier0TransportRowApi[];
 };
 
 export type OprTier0FactoryDataSaveResponse = {
@@ -324,4 +341,34 @@ export async function putOprTier0FactoryData(params: {
     `/api/data-mgmt/opr/tier0/factory-data?${q}`,
     { method: "PUT", json: params.body },
   );
+}
+
+export type OprDataRequestCreateBody = {
+  project_id: number;
+  product_id: number;
+  product_variant_id: number;
+  reporting_year: number;
+  reporting_month: number;
+  requester_supply_chain_node_id?: number | null;
+  requested_by_user_id?: number | null;
+  request_mode?: "chain" | "direct";
+  message?: string | null;
+  due_date?: string | null;
+  target_supply_chain_node_ids: number[];
+};
+
+export type OprDataRequestCreateResponse = {
+  request_id: number;
+  status: string;
+  target_count: number;
+  message: string;
+};
+
+export async function postOprDataRequest(
+  body: OprDataRequestCreateBody,
+): Promise<OprDataRequestCreateResponse> {
+  return apiFetch<OprDataRequestCreateResponse>("/api/data-mgmt/opr/data-requests", {
+    method: "POST",
+    json: body,
+  });
 }

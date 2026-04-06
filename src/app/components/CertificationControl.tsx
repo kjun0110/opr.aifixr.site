@@ -1,10 +1,10 @@
 'use client';
 
-import { useState } from 'react';
-import { Search, Filter, Download, Info, CheckCircle, AlertTriangle, Clock, X } from 'lucide-react';
+import { useMemo, useState } from 'react';
+import { Search, Download, Info, CheckCircle, AlertTriangle, Clock, X, FileText } from 'lucide-react';
 import { toast } from 'sonner';
 
-type TabType = 'rmi' | 'feoc';
+type TabType = 'rmi' | 'feoc' | 'coo';
 
 interface RMICompany {
   id: string;
@@ -32,6 +32,54 @@ interface FEOCCompany {
   reviewStatus: string;
   lastUpdate: string;
 }
+
+type OcrCertRow = {
+  id: string;
+  project: string;
+  product: string;
+  detailProduct: string;
+  supplier: string;
+  month: string; // YYYY-MM
+  exporter_name: string;
+  exporter_address: string;
+  exporter_telephone: string;
+  exporter_fax: string;
+  importer_name: string;
+  importer_address: string;
+  importer_telephone: string;
+  importer_fax: string;
+  country_of_origin: string;
+  serial_number: string;
+  product_description: string;
+  hs_code: string;
+  quantity: string;
+  invoice_reference: string;
+  certifying_authority: string;
+  issue_date: string;
+  signer_name: string;
+  signature_date: string;
+};
+
+const OCR_COLUMNS: Array<{ key: keyof OcrCertRow; label: string; minW?: string }> = [
+  { key: 'exporter_name', label: '수출자 이름', minW: 'min-w-[120px]' },
+  { key: 'exporter_address', label: '수출자 주소', minW: 'min-w-[180px]' },
+  { key: 'exporter_telephone', label: '수출자 전화번호', minW: 'min-w-[120px]' },
+  { key: 'exporter_fax', label: '수출자 팩스번호', minW: 'min-w-[120px]' },
+  { key: 'importer_name', label: '수취인 이름', minW: 'min-w-[120px]' },
+  { key: 'importer_address', label: '수취인 주소', minW: 'min-w-[180px]' },
+  { key: 'importer_telephone', label: '수입자 전화번호', minW: 'min-w-[120px]' },
+  { key: 'importer_fax', label: '수입자 팩스번호', minW: 'min-w-[120px]' },
+  { key: 'country_of_origin', label: '원산지 국가', minW: 'min-w-[120px]' },
+  { key: 'serial_number', label: '일련번호', minW: 'min-w-[120px]' },
+  { key: 'product_description', label: '상품 설명', minW: 'min-w-[160px]' },
+  { key: 'hs_code', label: 'HS 코드', minW: 'min-w-[100px]' },
+  { key: 'quantity', label: '수량', minW: 'min-w-[90px]' },
+  { key: 'invoice_reference', label: '송장 참조번호', minW: 'min-w-[130px]' },
+  { key: 'certifying_authority', label: '인증 기관', minW: 'min-w-[120px]' },
+  { key: 'issue_date', label: '발행일', minW: 'min-w-[100px]' },
+  { key: 'signer_name', label: '서명자 이름', minW: 'min-w-[110px]' },
+  { key: 'signature_date', label: '서명 날짜', minW: 'min-w-[110px]' },
+];
 
 // Mock RMI data
 const mockRMIData: RMICompany[] = [
@@ -151,6 +199,8 @@ const mockFEOCData: FEOCCompany[] = [
   },
 ];
 
+const cooRowsSource: OcrCertRow[] = [];
+
 export default function CertificationControl() {
   const [activeTab, setActiveTab] = useState<TabType>('rmi');
   const [searchTerm, setSearchTerm] = useState('');
@@ -159,6 +209,11 @@ export default function CertificationControl() {
   const [showOurSuppliersOnly, setShowOurSuppliersOnly] = useState(false);
   const [hoveredCompany, setHoveredCompany] = useState<string | null>(null);
   const [selectedFEOCCompany, setSelectedFEOCCompany] = useState<FEOCCompany | null>(null);
+  const [cooProject, setCooProject] = useState('');
+  const [cooProduct, setCooProduct] = useState('');
+  const [cooDetailProduct, setCooDetailProduct] = useState('');
+  const [cooSupplier, setCooSupplier] = useState('');
+  const [cooMonth, setCooMonth] = useState('');
 
   // RMI Statistics
   const totalRMICompanies = mockRMIData.length;
@@ -188,6 +243,34 @@ export default function CertificationControl() {
     if (selectedStatus && company.feocStatus !== selectedStatus) return false;
     return true;
   });
+
+  const cooRows = useMemo(() => {
+    return cooRowsSource.filter((r) => {
+      if (cooProject && r.project !== cooProject) return false;
+      if (cooProduct && r.product !== cooProduct) return false;
+      if (cooDetailProduct && r.detailProduct !== cooDetailProduct) return false;
+      if (cooSupplier && r.supplier !== cooSupplier) return false;
+      if (cooMonth && r.month !== cooMonth) return false;
+      return true;
+    });
+  }, [cooProject, cooProduct, cooDetailProduct, cooSupplier, cooMonth]);
+
+  const cooProjectOptions = useMemo(
+    () => Array.from(new Set(cooRowsSource.map((r) => r.project))).sort(),
+    [],
+  );
+  const cooProductOptions = useMemo(
+    () => Array.from(new Set(cooRowsSource.map((r) => r.product))).sort(),
+    [],
+  );
+  const cooDetailProductOptions = useMemo(
+    () => Array.from(new Set(cooRowsSource.map((r) => r.detailProduct))).sort(),
+    [],
+  );
+  const cooSupplierOptions = useMemo(
+    () => Array.from(new Set(cooRowsSource.map((r) => r.supplier))).sort(),
+    [],
+  );
 
   const getStatusBadge = (status: string) => {
     switch (status) {
@@ -263,6 +346,24 @@ export default function CertificationControl() {
           }
         >
           FEOC
+        </button>
+        <button
+          onClick={() => setActiveTab('coo')}
+          className={`px-6 py-3 rounded-xl font-semibold transition-all ${
+            activeTab === 'coo'
+              ? 'text-white'
+              : 'bg-white text-gray-600 hover:bg-gray-50'
+          }`}
+          style={
+            activeTab === 'coo'
+              ? {
+                  background: 'linear-gradient(90deg, #5B3BFA 0%, #00B4FF 100%)',
+                  boxShadow: '0px 4px 12px rgba(91,59,250,0.2)',
+                }
+              : {}
+          }
+        >
+          원산지 증명서
         </button>
       </div>
 
@@ -676,6 +777,156 @@ export default function CertificationControl() {
 
             <div className="mt-4 text-sm text-gray-600">
               총 <span className="font-semibold text-[#5B3BFA]">{filteredFEOCData.length}</span>개 협력사
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* COO Tab Content */}
+      {activeTab === 'coo' && (
+        <div className="space-y-6">
+          <div
+            className="bg-white p-6"
+            style={{
+              borderRadius: '20px',
+              boxShadow: '0px 4px 16px rgba(0,0,0,0.05)',
+            }}
+          >
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold">원산지 증명서(OCRO) 조회</h3>
+              <div className="flex items-center gap-2 text-sm text-gray-600">
+                <Info className="w-4 h-4" />
+                <span>협력사 OCR 데이터 입력 스키마를 월별로 조회합니다</span>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-3">
+              <select
+                value={cooProject}
+                onChange={(e) => setCooProject(e.target.value)}
+                className="px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5B3BFA]"
+              >
+                <option value="">프로젝트 선택</option>
+                {cooProjectOptions.map((v) => (
+                  <option key={v} value={v}>{v}</option>
+                ))}
+              </select>
+              <select
+                value={cooProduct}
+                onChange={(e) => setCooProduct(e.target.value)}
+                className="px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5B3BFA]"
+              >
+                <option value="">제품 선택</option>
+                {cooProductOptions.map((v) => (
+                  <option key={v} value={v}>{v}</option>
+                ))}
+              </select>
+              <select
+                value={cooDetailProduct}
+                onChange={(e) => setCooDetailProduct(e.target.value)}
+                className="px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5B3BFA]"
+              >
+                <option value="">세부제품 선택</option>
+                {cooDetailProductOptions.map((v) => (
+                  <option key={v} value={v}>{v}</option>
+                ))}
+              </select>
+              <select
+                value={cooSupplier}
+                onChange={(e) => setCooSupplier(e.target.value)}
+                className="px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5B3BFA]"
+              >
+                <option value="">협력사 선택</option>
+                {cooSupplierOptions.map((v) => (
+                  <option key={v} value={v}>{v}</option>
+                ))}
+              </select>
+              <input
+                type="month"
+                value={cooMonth}
+                onChange={(e) => setCooMonth(e.target.value)}
+                className="px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5B3BFA]"
+              />
+            </div>
+          </div>
+
+          <div
+            className="bg-white overflow-hidden"
+            style={{
+              borderRadius: '20px',
+              boxShadow: '0px 4px 16px rgba(0,0,0,0.05)',
+            }}
+          >
+            <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+              <div>
+                <h4 className="text-lg font-bold">월별 인터페이스 · OCR 반영 스키마 (OCRO)</h4>
+                <p className="text-sm text-gray-500 mt-1">
+                  조회 월: {cooMonth || '-'} · 총 {cooRows.length}건
+                </p>
+              </div>
+              <button
+                onClick={() => toast.success('원산지 증명서 스키마 CSV를 다운로드합니다')}
+                className="px-4 py-2.5 border border-gray-300 rounded-xl hover:bg-gray-50 transition-colors flex items-center gap-2"
+              >
+                <Download className="w-4 h-4" />
+                내보내기
+              </button>
+            </div>
+            <div className="p-4 overflow-x-auto bg-[#F0F0F0]">
+              <div className="inline-block min-w-full align-middle border border-[#B4B4B4] bg-white">
+                <table className="border-collapse text-[13px] w-max min-w-full">
+                  <thead>
+                    <tr className="bg-[#E8E8E8]">
+                      {OCR_COLUMNS.map((col) => (
+                        <th
+                          key={String(col.key)}
+                          className={`border border-[#B4B4B4] px-2 py-1.5 text-left text-xs font-semibold ${col.minW ?? ''}`}
+                        >
+                          {col.label}
+                        </th>
+                      ))}
+                      <th className="border border-[#B4B4B4] px-2 py-1.5 text-left text-xs font-semibold min-w-[110px]">
+                        원본 파일
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {cooRows.length === 0 ? (
+                      <tr>
+                        <td
+                          colSpan={OCR_COLUMNS.length + 1}
+                          className="border border-[#B4B4B4] px-3 py-6 text-center text-sm text-gray-500"
+                        >
+                          조회 조건에 해당하는 원산지 증명 데이터가 없습니다.
+                        </td>
+                      </tr>
+                    ) : (
+                      cooRows.map((row) => (
+                        <tr key={row.id} className="bg-white">
+                          {OCR_COLUMNS.map((col) => (
+                            <td
+                              key={`${row.id}-${String(col.key)}`}
+                              className={`border border-[#B4B4B4] px-2 py-1.5 text-xs text-gray-800 whitespace-nowrap ${col.minW ?? ''}`}
+                            >
+                              {String(row[col.key] ?? '-')}
+                            </td>
+                          ))}
+                          <td className="border border-[#B4B4B4] px-2 py-1.5 text-center">
+                            <button
+                              type="button"
+                              onClick={() => toast.info('데모: 원본 파일 미리보기는 다음 단계에서 연동합니다.')}
+                              className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-white"
+                              style={{ background: 'linear-gradient(90deg, #5B3BFA 0%, #00B4FF 100%)' }}
+                            >
+                              <FileText className="h-3.5 w-3.5" />
+                              보기
+                            </button>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
         </div>

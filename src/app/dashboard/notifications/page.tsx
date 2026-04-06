@@ -115,13 +115,20 @@ function mapKjNotification(row: NotificationItemOut): Notification {
   if (row.notification_type === 'signup_submitted_for_review') {
     const companyMatch = row.body?.match(/「([^」]+)」/);
     const companyName = companyMatch?.[1]?.replace(/님$/, '')?.trim() || '협력사';
+    const st = row.signup_request_status;
+    const pending =
+      st === 'pending_approval' || st === null || st === undefined || st === '';
+    let resolvedType: NotificationType = 'APPROVAL_REQUEST';
+    if (st === 'approved') resolvedType = 'APPROVED';
+    else if (st === 'rejected') resolvedType = 'REJECTED';
+    const message = row.body || '프로젝트 진입 요청이 발생했습니다.';
     return {
       ...shared,
-      type: 'APPROVAL_REQUEST',
+      type: resolvedType,
       companyName,
       customerName: row.title,
-      message: row.body || '프로젝트 진입 요청이 발생했습니다.',
-      isActionRequired: true,
+      message,
+      isActionRequired: pending,
       signupRequestId: row.signup_request_id ?? undefined,
       requesterName: `${companyName} 담당자`,
       requestMessage: row.body || undefined,

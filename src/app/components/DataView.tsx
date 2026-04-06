@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo, useState, useEffect, useRef } from 'react';
-import { ChevronDown, ChevronRight, Search, Download, Upload, FileText, Filter, AlertTriangle, CheckCircle, Clock, MapPin, Folder, Info, Settings, Edit2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Search, Download, Upload, FileText, Filter, AlertTriangle, CheckCircle, Clock, MapPin, Folder, Info, Settings, Edit2, Send, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
 import ExportReportModal from './ExportReportModal';
@@ -12,11 +12,12 @@ import SupplyChainVersionModal from './SupplyChainVersionModal';
 import { useMode } from '../context/ModeContext';
 import { apiFetch, restoreOprSessionFromCookie } from '@/lib/api/client';
 import { getOprAccessToken } from '@/lib/api/sessionAccessToken';
-import type { OprMonthlyTierRow, OprQueryRequest } from '@/lib/api/dataMgmtOpr';
+import type { OprDataRequestCreateBody, OprMonthlyTierRow, OprQueryRequest } from '@/lib/api/dataMgmtOpr';
 import {
   downloadOprExport,
   getOprBomPeriod,
   getOprMonthlyOverview,
+  postOprDataRequest,
   postOprQuery,
 } from '@/lib/api/dataMgmtOpr';
 import { saveSupplierDetailSnapshot } from '@/lib/dataViewSupplierSnapshot';
@@ -28,6 +29,7 @@ const DATA_VIEW_MONTH_TREE_GRID_COLS =
 // Unified data structure - contains both procurement and PCF data
 interface DataNode {
   id: string;
+  supplyChainNodeId?: number | null;
   tier: string;
   companyName: string;
   companyNameEn: string;
@@ -65,6 +67,7 @@ interface DetailProductCard {
   custBranchId: number;
   productVariantId: number;
   projectId: number;
+  productId: number;
 }
 
 /** 공급망 캐스케이드 1행 (고객→지사→프로젝트→제품→세부제품) */
@@ -199,8 +202,12 @@ function rowToDataNode(row: OprMonthlyTierRow, id: string): DataNode {
   }
   const productType = pickMonthlyRowString(row, 'product_type', 'productType') ?? '-';
 
+  const detailKey = pickMonthlyRowString(row, 'detail_key', 'detailKey') ?? '';
+  const nodeMatch = /^node:(\d+):/.exec(detailKey);
+  const supplyChainNodeId = nodeMatch ? Number(nodeMatch[1]) : null;
   return {
     id,
+    supplyChainNodeId,
     tier: tierLabel,
     companyName,
     companyNameEn: '',
@@ -779,6 +786,21 @@ export default function DataView() {
   const [matchingMode, setMatchingMode] = useState<'auto' | 'manual'>('auto');
   const [showSupplyChainModal, setShowSupplyChainModal] = useState(false);
   const [selectedGroupInModal, setSelectedGroupInModal] = useState<string>(mockSupplyChainGroups[0].id);
+  const [showLowerTierRequestModal, setShowLowerTierRequestModal] = useState(false);
+  const [requestModalMonthKey, setRequestModalMonthKey] = useState<string | null>(null);
+  const [requestModalContext, setRequestModalContext] = useState<{
+    projectId: number;
+    productId: number;
+    productVariantId: number;
+    reportingYear: number;
+    reportingMonth: number;
+    requesterSupplyChainNodeId: number | null;
+  } | null>(null);
+  const [selectedRequestNodeIds, setSelectedRequestNodeIds] = useState<Set<string>>(new Set());
+  const [expandedRequestNodeIds, setExpandedRequestNodeIds] = useState<Set<string>>(new Set());
+  const [requestTierFilter, setRequestTierFilter] = useState<'all' | 'tier2' | 'tier3'>('all');
+  const [requestMessage, setRequestMessage] = useState('');
+  const [requestDueDate, setRequestDueDate] = useState('');
 
   // Generate period options
   const generatePeriodOptions = () => {
@@ -981,6 +1003,7 @@ export default function DataView() {
           custBranchId: pv.cust_branch_id,
           productVariantId: pv.product_variant_id,
           projectId: pv.project_id,
+          productId: pv.product_id,
         };
       });
 
@@ -1102,6 +1125,32 @@ export default function DataView() {
           setOverviewLoadingKey(null);
         }
       }
+    }
+  };
+
+  const ensureMonthOverviewLoaded = async (
+    card: DetailProductCard,
+    month: string,
+  ): Promise<DataNode | undefined> => {
+    const key = `${card.id}-${month}`;
+    const cached = overviewByKey[key];
+    if (cached) return cached;
+    if (!card.custBranchId || !card.productVariantId) return undefined;
+    const [y, m] = month.split('-').map(Number);
+    setOverviewLoadingKey(key);
+    setOverviewErrorKey(null);
+    try {
+      const ov = await getOprMonthlyOverview(card.productVariantId, y, m, card.custBranchId);
+      const tree = monthlyRowsToTree(ov.rows, card.id, month);
+      setOverviewByKey((prev) => ({ ...prev, [key]: tree }));
+      return tree;
+    } catch (e) {
+      console.error(e);
+      setOverviewErrorKey(key);
+      toast.error('요청 대상 노드를 불러오지 못했습니다');
+      return undefined;
+    } finally {
+      setOverviewLoadingKey(null);
     }
   };
 
@@ -1361,6 +1410,24 @@ export default function DataView() {
     );
   };
 
+  const collectTreeNodesWithRoot = (root: DataNode | undefined): DataNode[] => {
+    if (!root) return [];
+    const out: DataNode[] = [root];
+    const walk = (n: DataNode) => {
+      for (const c of n.children ?? []) {
+        out.push(c);
+        walk(c);
+      }
+    };
+    walk(root);
+    return out;
+  };
+
+  const parseTierNumber = (tierLabel: string): number => {
+    const m = /tier\s*(\d+)/i.exec(tierLabel);
+    return m ? Number(m[1]) : 0;
+  };
+
   // Format month for display (e.g. "2026-01" -> "2026년 1월")
   const formatMonthLabel = (month: string) => {
     const [y, m] = month.split('-').map(Number);
@@ -1474,32 +1541,75 @@ export default function DataView() {
                         </button>
                         <span className="font-medium text-gray-700">{formatMonthLabel(month)}</span>
                       </div>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          try {
-                            sessionStorage.setItem(DATA_VIEW_FILTER_STORAGE_KEY, JSON.stringify({
-                              selectedCustomer, selectedBranch, selectedProduct, selectedDetailProduct,
-                              periodMode, selectedPeriodStart, selectedPeriodEnd, generalPeriodStart, generalPeriodEnd,
-                              selectedProcess, selectedTier, selectedSupplier, selectedMaterialType, selectedMaterialName,
-                              selectedPcfStatus, hasQueried, searchTerm, sortBy,
-                              expandedProjects: Array.from(expandedProjects),
-                              expandedMonthSections: Array.from(expandedMonthSections),
-                              expandedNodes: Array.from(expandedNodes),
-                            }));
-                          } catch { /* ignore */ }
-                          const tier0Id = `${card.id}-${month}-tier0`;
-                          router.push(`/dashboard/pcf-calculation/result/${tier0Id}`);
-                        }}
-                        className="px-3 py-1.5 text-xs text-white rounded-lg hover:scale-105 transition-all flex items-center justify-center gap-1 flex-shrink-0"
-                        style={{
-                          background: 'linear-gradient(90deg, #00B4FF 0%, #5B3BFA 100%)',
-                        }}
-                      >
-                        <FileText className="w-3 h-3" />
-                        공급망 PCF 보기
-                      </button>
+                      <div className="ml-auto flex items-center gap-2">
+                        {mode === 'pcf' && (
+                          <button
+                            type="button"
+                          onClick={async (e) => {
+                              e.stopPropagation();
+                              const targetKey = `${card.id}-${month}`;
+                            const tree =
+                              overviewByKey[targetKey] ?? (await ensureMonthOverviewLoaded(card, month));
+                            const nodes = collectTreeNodesWithRoot(tree);
+                            if (nodes.length === 0) {
+                              toast.info('선택 가능한 하위 협력사 노드가 없습니다.');
+                            }
+                              setRequestModalMonthKey(targetKey);
+                              setRequestModalContext({
+                                projectId: card.projectId,
+                                productId: card.productId,
+                                productVariantId: card.productVariantId,
+                                reportingYear: Number(month.split('-')[0]),
+                                reportingMonth: Number(month.split('-')[1]),
+                                requesterSupplyChainNodeId: tree?.supplyChainNodeId ?? null,
+                              });
+                              setSelectedRequestNodeIds(
+                                new Set(
+                                  nodes
+                                    .filter((n) => n.id !== tree?.id)
+                                    .filter((n) => parseTierNumber(n.tier) >= 2)
+                                    .map((n) => n.id),
+                                ),
+                              );
+                              setExpandedRequestNodeIds(new Set(tree ? [tree.id] : []));
+                              setRequestTierFilter('all');
+                              setRequestMessage('');
+                              setRequestDueDate('');
+                              setShowLowerTierRequestModal(true);
+                            }}
+                            className="px-3 py-1.5 text-xs border border-[#5B3BFA] text-[#5B3BFA] rounded-lg hover:bg-violet-50 transition-all flex items-center justify-center gap-1 flex-shrink-0"
+                          >
+                            <Send className="w-3 h-3" />
+                            하위 협력사 데이터 요청
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            try {
+                              sessionStorage.setItem(DATA_VIEW_FILTER_STORAGE_KEY, JSON.stringify({
+                                selectedCustomer, selectedBranch, selectedProduct, selectedDetailProduct,
+                                periodMode, selectedPeriodStart, selectedPeriodEnd, generalPeriodStart, generalPeriodEnd,
+                                selectedProcess, selectedTier, selectedSupplier, selectedMaterialType, selectedMaterialName,
+                                selectedPcfStatus, hasQueried, searchTerm, sortBy,
+                                expandedProjects: Array.from(expandedProjects),
+                                expandedMonthSections: Array.from(expandedMonthSections),
+                                expandedNodes: Array.from(expandedNodes),
+                              }));
+                            } catch { /* ignore */ }
+                            const tier0Id = `${card.id}-${month}-tier0`;
+                            router.push(`/dashboard/pcf-calculation/result/${tier0Id}`);
+                          }}
+                          className="px-3 py-1.5 text-xs text-white rounded-lg hover:scale-105 transition-all flex items-center justify-center gap-1 flex-shrink-0"
+                          style={{
+                            background: 'linear-gradient(90deg, #00B4FF 0%, #5B3BFA 100%)',
+                          }}
+                        >
+                          <FileText className="w-3 h-3" />
+                          공급망 PCF 보기
+                        </button>
+                      </div>
                     </div>
 
                     {/* Tree: Tier 0부터 하위 협력사 (현재 빈 데이터) */}
@@ -1907,6 +2017,287 @@ export default function DataView() {
           }}
           onClose={() => setShowSupplyChainModal(false)}
         />
+      )}
+
+      {showLowerTierRequestModal && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4">
+          <div className="w-full max-w-5xl rounded-2xl bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4">
+              <div>
+                <h3 className="text-xl font-bold text-gray-900">데이터 요청 모달</h3>
+                <p className="text-sm text-gray-500">자신보다 하위 차수 전체에 직접 데이터 요청을 보냅니다.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowLowerTierRequestModal(false);
+                  setRequestModalContext(null);
+                }}
+                className="rounded-lg p-2 text-gray-500 hover:bg-gray-100"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 gap-6 px-6 py-5 md:grid-cols-2">
+              <div>
+                <div className="mb-2 flex items-center justify-between">
+                  <h4 className="text-sm font-semibold text-gray-800">요청 대상 선택</h4>
+                </div>
+                <div className="mb-3 flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const root = requestModalMonthKey ? overviewByKey[requestModalMonthKey] : undefined;
+                      const nodes = collectTreeNodesWithRoot(root);
+                      setRequestTierFilter('all');
+                      setSelectedRequestNodeIds(
+                        new Set(
+                          nodes
+                            .filter((n) => n.id !== root?.id)
+                            .filter((n) => parseTierNumber(n.tier) >= 2)
+                            .map((n) => n.id),
+                        ),
+                      );
+                      setExpandedRequestNodeIds(new Set(nodes.map((n) => n.id)));
+                    }}
+                    className={`rounded-lg border px-3 py-1 text-xs transition-colors ${
+                      requestTierFilter === 'all'
+                        ? 'border-[#5B3BFA] bg-violet-50 text-[#5B3BFA]'
+                        : 'border-gray-300 text-gray-700 hover:bg-gray-50'
+                    }`}
+                  >
+                    전체 선택
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const root = requestModalMonthKey ? overviewByKey[requestModalMonthKey] : undefined;
+                      const nodes = collectTreeNodesWithRoot(root);
+                      const next = nodes
+                        .filter((n) => n.id !== root?.id)
+                        .filter((n) => parseTierNumber(n.tier) >= 2)
+                        .map((n) => n.id);
+                      setRequestTierFilter('tier2');
+                      setSelectedRequestNodeIds(new Set(next));
+                      setExpandedRequestNodeIds(new Set(nodes.map((n) => n.id)));
+                    }}
+                    className={`rounded-lg border px-3 py-1 text-xs transition-colors ${
+                      requestTierFilter === 'tier2'
+                        ? 'border-[#5B3BFA] bg-violet-50 text-[#5B3BFA]'
+                        : 'border-gray-300 text-gray-700 hover:bg-gray-50'
+                    }`}
+                  >
+                    2차만
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const root = requestModalMonthKey ? overviewByKey[requestModalMonthKey] : undefined;
+                      const nodes = collectTreeNodesWithRoot(root);
+                      const next = nodes
+                        .filter((n) => n.id !== root?.id)
+                        .filter((n) => parseTierNumber(n.tier) >= 3)
+                        .map((n) => n.id);
+                      setRequestTierFilter('tier3');
+                      setSelectedRequestNodeIds(new Set(next));
+                      setExpandedRequestNodeIds(new Set(nodes.map((n) => n.id)));
+                    }}
+                    className={`rounded-lg border px-3 py-1 text-xs transition-colors ${
+                      requestTierFilter === 'tier3'
+                        ? 'border-[#5B3BFA] bg-violet-50 text-[#5B3BFA]'
+                        : 'border-gray-300 text-gray-700 hover:bg-gray-50'
+                    }`}
+                  >
+                    3차만
+                  </button>
+                </div>
+                <div className="max-h-72 overflow-auto rounded-xl border border-gray-200 p-3">
+                  {(() => {
+                    const root = requestModalMonthKey ? overviewByKey[requestModalMonthKey] : undefined;
+                    if (!root) {
+                      return <p className="text-sm text-gray-500">요청 대상이 없습니다.</p>;
+                    }
+
+                    const toggleExpand = (nodeId: string) => {
+                      setExpandedRequestNodeIds((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(nodeId)) next.delete(nodeId);
+                        else next.add(nodeId);
+                        return next;
+                      });
+                    };
+
+                    const renderRequestNode = (node: DataNode, depth: number, isRoot = false): JSX.Element => {
+                      const hasChildren = (node.children?.length ?? 0) > 0;
+                      const isExpanded = expandedRequestNodeIds.has(node.id);
+                      const checked = selectedRequestNodeIds.has(node.id);
+                      const tierNo = parseTierNumber(node.tier);
+                      const selectableByFilter =
+                        requestTierFilter === 'all'
+                          ? tierNo >= 2
+                          : requestTierFilter === 'tier2'
+                            ? tierNo >= 2
+                            : tierNo >= 3;
+                      const isSelectable = !isRoot && selectableByFilter;
+
+                      return (
+                        <div key={node.id}>
+                          <div
+                            className="mb-1 flex items-center gap-2 rounded px-1 py-1 hover:bg-gray-50"
+                            style={{ marginLeft: `${Math.max(0, depth) * 12}px` }}
+                          >
+                            {hasChildren ? (
+                              <button
+                                type="button"
+                                onClick={() => toggleExpand(node.id)}
+                                className="rounded p-0.5 text-gray-500 hover:bg-gray-100"
+                              >
+                                {isExpanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                              </button>
+                            ) : (
+                              <span className="inline-block h-4 w-4" />
+                            )}
+
+                            {isRoot ? (
+                              <span className="inline-block h-4 w-4" />
+                            ) : (
+                              <input
+                                type="checkbox"
+                                disabled={!isSelectable}
+                                checked={checked}
+                                onChange={(e) => {
+                                  if (!isSelectable) return;
+                                  setSelectedRequestNodeIds((prev) => {
+                                    const next = new Set(prev);
+                                    if (e.target.checked) next.add(node.id);
+                                    else next.delete(node.id);
+                                    return next;
+                                  });
+                                }}
+                              />
+                            )}
+
+                            <span className="rounded bg-blue-50 px-2 py-0.5 text-xs text-blue-700">{node.tier}</span>
+                            <span className={`text-sm ${isSelectable || isRoot ? 'text-gray-800' : 'text-gray-400'}`}>{node.companyName}</span>
+                          </div>
+
+                          {hasChildren && isExpanded && (
+                            <div>
+                              {node.children!.map((child) => renderRequestNode(child, depth + 1, false))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    };
+
+                    return (
+                      <>
+                        <div className="mb-3 text-xs text-gray-500">
+                          현재 선택된 노드: <span className="font-semibold text-gray-800">{root.companyName} (나)</span>
+                        </div>
+                        {renderRequestNode(root, 0, true)}
+                      </>
+                    );
+                  })()}
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                <div>
+                  <h4 className="mb-2 text-sm font-semibold text-gray-800">요청 메시지 입력</h4>
+                  <textarea
+                    value={requestMessage}
+                    onChange={(e) => setRequestMessage(e.target.value)}
+                    placeholder="요청 메시지 입력"
+                    className="h-24 w-full rounded-xl border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#5B3BFA]"
+                  />
+                </div>
+                <div>
+                  <h4 className="mb-2 text-sm font-semibold text-gray-800">제출 기한 설정</h4>
+                  <input
+                    type="date"
+                    value={requestDueDate}
+                    onChange={(e) => setRequestDueDate(e.target.value)}
+                    className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 border-t border-gray-200 px-6 py-4">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowLowerTierRequestModal(false);
+                  setRequestModalContext(null);
+                }}
+                className="rounded-lg border border-gray-300 px-4 py-2 text-sm hover:bg-gray-50"
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  if (selectedRequestNodeIds.size === 0) {
+                    toast.error('요청 대상을 1개 이상 선택해주세요.');
+                    return;
+                  }
+                  if (!requestModalContext) {
+                    toast.error('요청 컨텍스트를 찾을 수 없습니다. 모달을 다시 열어주세요.');
+                    return;
+                  }
+                  if (!requestDueDate) {
+                    toast.error('제출 기한을 선택해주세요.');
+                    return;
+                  }
+
+                  const root = requestModalMonthKey ? overviewByKey[requestModalMonthKey] : undefined;
+                  const allNodes: DataNode[] = [];
+                  const walk = (n?: DataNode) => {
+                    if (!n) return;
+                    allNodes.push(n);
+                    for (const c of n.children ?? []) walk(c);
+                  };
+                  walk(root);
+                  const targetNodeIds = allNodes
+                    .filter((n) => selectedRequestNodeIds.has(n.id))
+                    .map((n) => n.supplyChainNodeId)
+                    .filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+                  if (targetNodeIds.length === 0) {
+                    toast.error('요청 가능한 공급망 노드를 찾지 못했습니다.');
+                    return;
+                  }
+
+                  const payload: OprDataRequestCreateBody = {
+                    project_id: requestModalContext.projectId,
+                    product_id: requestModalContext.productId,
+                    product_variant_id: requestModalContext.productVariantId,
+                    reporting_year: requestModalContext.reportingYear,
+                    reporting_month: requestModalContext.reportingMonth,
+                    requester_supply_chain_node_id: requestModalContext.requesterSupplyChainNodeId,
+                    request_mode: 'chain',
+                    message: requestMessage || null,
+                    due_date: requestDueDate,
+                    target_supply_chain_node_ids: targetNodeIds,
+                  };
+                  try {
+                    const res = await postOprDataRequest(payload);
+                    toast.success(`요청 ${res.target_count}건을 전송했습니다.`);
+                    setShowLowerTierRequestModal(false);
+                    setRequestModalContext(null);
+                  } catch (e) {
+                    const msg = e instanceof Error ? e.message : String(e);
+                    toast.error(`요청 전송 실패: ${msg}`);
+                  }
+                }}
+                className="rounded-lg bg-[#5B3BFA] px-4 py-2 text-sm font-semibold text-white hover:opacity-90"
+              >
+                요청 보내기
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
