@@ -2128,7 +2128,7 @@ export default function DataView() {
                       });
                     };
 
-                    const renderRequestNode = (node: DataNode, depth: number, isRoot = false): JSX.Element => {
+                    const renderRequestNode = (node: DataNode, depth: number, isRoot = false) => {
                       const hasChildren = (node.children?.length ?? 0) > 0;
                       const isExpanded = expandedRequestNodeIds.has(node.id);
                       const checked = selectedRequestNodeIds.has(node.id);
