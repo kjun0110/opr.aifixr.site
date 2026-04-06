@@ -3523,7 +3523,6 @@ export default function Tier0Detail() {
                               }
                               baseOptions={transportQtyUnitBaseOptions}
                               placeholder="물량 단위 선택"
-                              allowCreate={false}
                             />
                           ) : (
                             safeValue(row.transportQtyUnit)
@@ -3557,7 +3556,6 @@ export default function Tier0Detail() {
                               }
                               baseOptions={transportEfUnitBaseOptions}
                               placeholder="운송 배출계수 단위 선택"
-                              allowCreate={false}
                             />
                           ) : (
                             safeValue(row.transportEmissionFactorUnit)
