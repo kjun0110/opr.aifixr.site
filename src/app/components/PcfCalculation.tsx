@@ -438,7 +438,7 @@ interface CalculationHistory {
 export default function PcfCalculation() {
   const router = useRouter();
   const { mode } = useMode();
-  
+
   // 세부탭 상태
   const [activeTab, setActiveTab] = useState<'calculation' | 'history'>('calculation');
 
@@ -449,7 +449,7 @@ export default function PcfCalculation() {
     project_start: string;
     project_end: string;
   } | null>(null);
-  
+
   // Selection states (값은 DB id 문자열, 데이터 관리와 동일)
   const [selectedCustomer, setSelectedCustomer] = useState<string>('');
   const [selectedBranch, setSelectedBranch] = useState<string>('');
@@ -803,7 +803,7 @@ export default function PcfCalculation() {
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set(['prime']));
 
   // 계산식 드로어 상태
-  const [detailDrawer, setDetailDrawer] = useState<{open: boolean; companyId: string | null}>({
+  const [detailDrawer, setDetailDrawer] = useState<{ open: boolean; companyId: string | null }>({
     open: false,
     companyId: null,
   });
@@ -812,7 +812,7 @@ export default function PcfCalculation() {
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(['material', 'energy', 'transport', 'supplier']));
 
   // 히스토리 상세보기 모달 상태
-  const [historyDetailModal, setHistoryDetailModal] = useState<{open: boolean; historyId: string | null}>({
+  const [historyDetailModal, setHistoryDetailModal] = useState<{ open: boolean; historyId: string | null }>({
     open: false,
     historyId: null,
   });
@@ -1270,7 +1270,7 @@ export default function PcfCalculation() {
     if (currentResult !== 'final' || mockCompanyResults.length === 0) return [];
     const primeData = mockCompanyResults[0];
     const totalPcf = primeData.finalPcf;
-    
+
     const contributions: { companyName: string; contribution: number; percentage: number }[] = [];
     if (primeData.children) {
       primeData.children.forEach((tier1) => {
@@ -1293,9 +1293,8 @@ export default function PcfCalculation() {
     return (
       <React.Fragment key={company.id}>
         <div
-          className={`grid grid-cols-12 px-4 py-3 border-b border-gray-100 text-sm ${
-            isPrime ? 'bg-blue-50 font-semibold' : 'hover:bg-gray-50 cursor-pointer'
-          }`}
+          className={`grid grid-cols-12 px-4 py-3 border-b border-gray-100 text-sm ${isPrime ? 'bg-blue-50 font-semibold' : 'hover:bg-gray-50 cursor-pointer'
+            }`}
           style={{ paddingLeft: `${depth * 24 + 16}px` }}
         >
           <div className="col-span-4 flex items-center gap-2">
@@ -1362,22 +1361,20 @@ export default function PcfCalculation() {
       <div className="flex gap-2 border-b border-gray-200">
         <button
           onClick={() => setActiveTab('calculation')}
-          className={`px-6 py-3 text-xl font-semibold transition-all ${
-            activeTab === 'calculation'
+          className={`px-6 py-3 text-xl font-semibold transition-all ${activeTab === 'calculation'
               ? 'border-b-2 border-[#00B4FF] text-[#00B4FF]'
               : 'text-gray-500 hover:text-gray-700'
-          }`}
+            }`}
         >
           <Calculator className="w-4 h-4 inline-block mr-2" />
           계산
         </button>
         <button
           onClick={() => setActiveTab('history')}
-          className={`px-6 py-3 text-xl font-semibold transition-all ${
-            activeTab === 'history'
+          className={`px-6 py-3 text-xl font-semibold transition-all ${activeTab === 'history'
               ? 'border-b-2 border-[#00B4FF] text-[#00B4FF]'
               : 'text-gray-500 hover:text-gray-700'
-          }`}
+            }`}
         >
           <History className="w-4 h-4 inline-block mr-2" />
           히스토리
@@ -1555,121 +1552,121 @@ export default function PcfCalculation() {
               </div>
             ) : (
               <>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-              <div className="bg-white/70 p-4 rounded-lg">
-                <div className="text-xs text-gray-600 mb-2">자사 데이터 준비 여부</div>
-                <div className="flex items-center gap-2">
-                  {pcfReadinessLoading ? (
-                    <span className="font-bold text-gray-400">불러오는 중…</span>
-                  ) : primaryDataComplete ? (
-                    <>
-                      <CheckCircle className="w-5 h-5 text-green-600" />
-                      <span className="font-bold text-green-600">준비 완료</span>
-                    </>
-                  ) : (
-                    <>
-                      <AlertTriangle className="w-5 h-5 text-red-600" />
-                      <span className="font-bold text-red-600">미입력</span>
-                    </>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+                  <div className="bg-white/70 p-4 rounded-lg">
+                    <div className="text-xs text-gray-600 mb-2">자사 데이터 준비 여부</div>
+                    <div className="flex items-center gap-2">
+                      {pcfReadinessLoading ? (
+                        <span className="font-bold text-gray-400">불러오는 중…</span>
+                      ) : primaryDataComplete ? (
+                        <>
+                          <CheckCircle className="w-5 h-5 text-green-600" />
+                          <span className="font-bold text-green-600">준비 완료</span>
+                        </>
+                      ) : (
+                        <>
+                          <AlertTriangle className="w-5 h-5 text-red-600" />
+                          <span className="font-bold text-red-600">미입력</span>
+                        </>
+                      )}
+                    </div>
+                    {!pcfReadinessLoading && pcfReadiness && !primaryDataComplete && (
+                      <p className="mt-2 text-xs text-gray-500">
+                        데이터 관리 Tier0(자재·에너지·생산) 또는 공정활동 행이 있어야 합니다.
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="bg-white/70 p-4 rounded-lg">
+                    <div className="text-xs text-gray-600 mb-2">하위 협력사 데이터 제출 현황</div>
+                    <div className="flex items-center gap-2">
+                      {pcfReadinessLoading ? (
+                        <span className="font-bold text-gray-400">불러오는 중…</span>
+                      ) : allSuppliersReady ? (
+                        <>
+                          <CheckCircle className="w-5 h-5 text-green-600" />
+                          <span className="font-bold text-green-600">
+                            {supplierDataTotal === 0
+                              ? '대상 없음'
+                              : `${supplierDataComplete} / ${supplierDataTotal}`}
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <Clock className="w-5 h-5 text-yellow-600" />
+                          <span className="font-bold text-yellow-600">
+                            {supplierDataComplete} / {supplierDataTotal}
+                          </span>
+                        </>
+                      )}
+                    </div>
+                    {!pcfReadinessLoading && supplierDataTotal === 0 && (
+                      <p className="mt-2 text-xs text-gray-500">
+                        원청 승인이 완료된 하위 협력사 노드가 없으면 제출 현황은 0/0이며, 최종 산정도 바로 가능합니다.
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="bg-white/70 p-4 rounded-lg">
+                    <div className="text-xs text-gray-600 mb-2">부분산정 가능 여부</div>
+                    <div className="flex items-center gap-2">
+                      {canPartialCalculate ? (
+                        <>
+                          <CheckCircle className="w-5 h-5 text-green-600" />
+                          <span className="font-bold text-green-600">가능</span>
+                        </>
+                      ) : (
+                        <>
+                          <AlertTriangle className="w-5 h-5 text-gray-400" />
+                          <span className="font-bold text-gray-400">불가</span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="bg-white/70 p-4 rounded-lg">
+                    <div className="text-xs text-gray-600 mb-2">최종산정 가능 여부</div>
+                    <div className="flex items-center gap-2">
+                      {canFinalCalculate ? (
+                        <>
+                          <CheckCircle className="w-5 h-5 text-green-600" />
+                          <span className="font-bold text-green-600">가능</span>
+                        </>
+                      ) : (
+                        <>
+                          <Clock className="w-5 h-5 text-yellow-600" />
+                          <span className="font-bold text-yellow-600">대기</span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-white/70 p-4 rounded-lg mb-4">
+                  <div className="text-xs text-gray-600 mb-2">미입력 협력사 수</div>
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-red-700 text-lg">
+                      {pcfReadinessLoading ? '—' : `${missingSuppliers}곳`}
+                    </span>
+                    <button
+                      onClick={handleRequestMissingSuppliers}
+                      disabled={pcfReadinessLoading || missingSuppliers === 0}
+                      className="px-3 py-1.5 text-xs border border-[#00B4FF] text-[#00B4FF] rounded-lg hover:bg-blue-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      미입력 협력사 요청
+                    </button>
+                  </div>
+                </div>
+
+                {!pcfReadinessLoading &&
+                  allSuppliersReady &&
+                  supplierDataTotal > 0 &&
+                  primaryDataComplete && (
+                    <div className="mb-4 rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-900">
+                      하위 협력사 데이터 제출이 모두 완료되어 <strong>전체 준비</strong> 상태입니다. 최종 PCF 산정을
+                      실행할 수 있습니다.
+                    </div>
                   )}
-                </div>
-                {!pcfReadinessLoading && pcfReadiness && !primaryDataComplete && (
-                  <p className="mt-2 text-xs text-gray-500">
-                    데이터 관리 Tier0(자재·에너지·생산) 또는 공정활동 행이 있어야 합니다.
-                  </p>
-                )}
-              </div>
-
-              <div className="bg-white/70 p-4 rounded-lg">
-                <div className="text-xs text-gray-600 mb-2">하위 협력사 데이터 제출 현황</div>
-                <div className="flex items-center gap-2">
-                  {pcfReadinessLoading ? (
-                    <span className="font-bold text-gray-400">불러오는 중…</span>
-                  ) : allSuppliersReady ? (
-                    <>
-                      <CheckCircle className="w-5 h-5 text-green-600" />
-                      <span className="font-bold text-green-600">
-                        {supplierDataTotal === 0
-                          ? '대상 없음'
-                          : `${supplierDataComplete} / ${supplierDataTotal}`}
-                      </span>
-                    </>
-                  ) : (
-                    <>
-                      <Clock className="w-5 h-5 text-yellow-600" />
-                      <span className="font-bold text-yellow-600">
-                        {supplierDataComplete} / {supplierDataTotal}
-                      </span>
-                    </>
-                  )}
-                </div>
-                {!pcfReadinessLoading && supplierDataTotal === 0 && (
-                  <p className="mt-2 text-xs text-gray-500">
-                    원청 승인이 완료된 하위 협력사 노드가 없으면 제출 현황은 0/0이며, 최종 산정도 바로 가능합니다.
-                  </p>
-                )}
-              </div>
-
-              <div className="bg-white/70 p-4 rounded-lg">
-                <div className="text-xs text-gray-600 mb-2">부분산정 가능 여부</div>
-                <div className="flex items-center gap-2">
-                  {canPartialCalculate ? (
-                    <>
-                      <CheckCircle className="w-5 h-5 text-green-600" />
-                      <span className="font-bold text-green-600">가능</span>
-                    </>
-                  ) : (
-                    <>
-                      <AlertTriangle className="w-5 h-5 text-gray-400" />
-                      <span className="font-bold text-gray-400">불가</span>
-                    </>
-                  )}
-                </div>
-              </div>
-
-              <div className="bg-white/70 p-4 rounded-lg">
-                <div className="text-xs text-gray-600 mb-2">최종산정 가능 여부</div>
-                <div className="flex items-center gap-2">
-                  {canFinalCalculate ? (
-                    <>
-                      <CheckCircle className="w-5 h-5 text-green-600" />
-                      <span className="font-bold text-green-600">가능</span>
-                    </>
-                  ) : (
-                    <>
-                      <Clock className="w-5 h-5 text-yellow-600" />
-                      <span className="font-bold text-yellow-600">대기</span>
-                    </>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            <div className="bg-white/70 p-4 rounded-lg mb-4">
-              <div className="text-xs text-gray-600 mb-2">미입력 협력사 수</div>
-              <div className="flex items-center justify-between">
-                <span className="font-bold text-red-700 text-lg">
-                  {pcfReadinessLoading ? '—' : `${missingSuppliers}곳`}
-                </span>
-                <button
-                  onClick={handleRequestMissingSuppliers}
-                  disabled={pcfReadinessLoading || missingSuppliers === 0}
-                  className="px-3 py-1.5 text-xs border border-[#00B4FF] text-[#00B4FF] rounded-lg hover:bg-blue-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  미입력 협력사 요청
-                </button>
-              </div>
-            </div>
-
-            {!pcfReadinessLoading &&
-              allSuppliersReady &&
-              supplierDataTotal > 0 &&
-              primaryDataComplete && (
-                <div className="mb-4 rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-900">
-                  하위 협력사 데이터 제출이 모두 완료되어 <strong>전체 준비</strong> 상태입니다. 최종 PCF 산정을
-                  실행할 수 있습니다.
-                </div>
-              )}
               </>
             )}
           </div>
@@ -1698,11 +1695,10 @@ export default function PcfCalculation() {
                 <button
                   onClick={handlePartialCalculate}
                   disabled={!canPartialCalculate}
-                  className={`w-full px-4 py-3 rounded-lg font-semibold flex items-center justify-center gap-2 transition-all ${
-                    canPartialCalculate
+                  className={`w-full px-4 py-3 rounded-lg font-semibold flex items-center justify-center gap-2 transition-all ${canPartialCalculate
                       ? 'bg-gradient-to-r from-orange-400 to-orange-600 text-white hover:scale-105'
                       : 'bg-gray-200 text-gray-400 cursor-not-allowed'
-                  }`}
+                    }`}
                 >
                   <Play className="w-5 h-5" />
                   부분산정 실행
@@ -1722,11 +1718,10 @@ export default function PcfCalculation() {
                 <button
                   onClick={handleFinalCalculate}
                   disabled={!canFinalCalculate}
-                  className={`w-full px-4 py-3 rounded-lg font-semibold flex items-center justify-center gap-2 transition-all ${
-                    canFinalCalculate
+                  className={`w-full px-4 py-3 rounded-lg font-semibold flex items-center justify-center gap-2 transition-all ${canFinalCalculate
                       ? 'bg-gradient-to-r from-green-500 to-green-700 text-white hover:scale-105'
                       : 'bg-gray-200 text-gray-400 cursor-not-allowed'
-                  }`}
+                    }`}
                 >
                   <Play className="w-5 h-5" />
                   최종 PCF 산정 실행
@@ -2035,9 +2030,8 @@ export default function PcfCalculation() {
                 {mockHistories.map((hist, idx) => (
                   <tr
                     key={hist.id}
-                    className={`border-b border-gray-100 hover:bg-blue-50 ${
-                      idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'
-                    }`}
+                    className={`border-b border-gray-100 hover:bg-blue-50 ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'
+                      }`}
                   >
                     {isHistoryDownloadSelecting && (
                       <td className="px-4 py-3 text-center">
@@ -2138,7 +2132,7 @@ export default function PcfCalculation() {
               <div>
                 <h3 className="font-bold text-lg">계산식 상세</h3>
                 <p className="text-sm text-gray-500 mt-1">
-                  {mockCompanyResults.length > 0 && 
+                  {mockCompanyResults.length > 0 &&
                     (() => {
                       const findCompany = (companies: CompanyResult[]): CompanyResult | null => {
                         for (const c of companies) {
@@ -2378,7 +2372,7 @@ export default function PcfCalculation() {
                 {/* PCF 구성 분석 */}
                 <div>
                   <h4 className="font-bold text-lg mb-4">PCF 구성 분석</h4>
-                  
+
                   {/* 내 공정 배출 */}
                   <div className="mb-4">
                     <div className="flex items-center justify-between text-sm mb-2">

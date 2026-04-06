@@ -45,6 +45,8 @@ export function apiUrl(path: string): string {
 
 export type ApiClientOptions = Omit<RequestInit, "body"> & {
   json?: unknown;
+  /** FormData·URLSearchParams 등 — `json`과 함께 쓰지 마세요(우선 `json`이 본문이 됨) */
+  body?: RequestInit["body"];
   /** true면 401 시 리프레시 1회 후 원 요청 재시도 (기본 true) */
   retryOn401?: boolean;
 };
