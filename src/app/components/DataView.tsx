@@ -1060,11 +1060,13 @@ export default function DataView() {
       return;
     }
     try {
-      const blob = await downloadOprExport(format, body);
+      const { blob, filename } = await downloadOprExport(format, body);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = format === 'csv' ? 'opr_data_mgmt_export.csv' : 'opr_data_mgmt_export.xlsx';
+      a.download =
+        filename ??
+        (format === 'csv' ? 'opr_data_mgmt_export.csv' : 'opr_data_mgmt_export.xlsx');
       a.rel = 'noopener';
       document.body.appendChild(a);
       a.click();

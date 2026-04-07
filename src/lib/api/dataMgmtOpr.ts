@@ -84,6 +84,7 @@ export type OprTier0RowContextResponse = {
   cust_branch_id: number;
   branch_name: string;
   project_id: number;
+  project_name: string;
   product_id: number;
   product_name: string;
   product_variant_id: number;
@@ -186,20 +187,20 @@ export async function getOprPcfReadiness(
 export async function downloadOprExport(
   format: "csv" | "xlsx",
   body: OprQueryRequest,
-): Promise<Blob> {
+): Promise<{ blob: Blob; filename: string | null }> {
   const path =
     format === "csv" ? "/api/data-mgmt/opr/export/csv" : "/api/data-mgmt/opr/export/xlsx";
   return apiFetchBlob(path, { method: "POST", json: body });
 }
 
-/** Tier0 상세 — tier0_row_context·IAM·DB 기준 시트 (탭 1~3·8·4~7, 시트 2는 X-Actor-User-Id 필요) */
+/** Tier0 상세 — tier0/export.xlsx (기본 8·1~7·9, 시트 2는 X-Actor-User-Id 필요) */
 export async function downloadOprTier0ExportXlsx(params: {
   custBranchId: number;
   productVariantId: number;
   reportingYear: number;
   reportingMonth: number;
   sheetTabIds: number[];
-}): Promise<Blob> {
+}): Promise<{ blob: Blob; filename: string | null }> {
   const q = new URLSearchParams({
     cust_branch_id: String(params.custBranchId),
     product_variant_id: String(params.productVariantId),
@@ -254,6 +255,7 @@ export type OprTier0ProductionRowApi = {
   site_name?: string;
   production_qty?: string;
   production_qty_unit?: string;
+  defective_qty?: string;
   waste_qty?: string;
   waste_qty_unit?: string;
   waste_emission_factor?: string;
@@ -267,6 +269,9 @@ export type OprTier0TransportRowApi = {
   destination_country?: string;
   destination_address_detail?: string;
   transport_mode?: string;
+  transport_fuel_type?: string;
+  transport_fuel_qty?: string;
+  transport_fuel_qty_unit?: string;
   transport_qty?: string;
   transport_qty_unit?: string;
   transport_emission_factor?: string;

@@ -77,14 +77,15 @@ export async function getContractRevisionStatusCounts(): Promise<RevisionStatusC
 }
 
 export async function fetchContractRevisionPdfBlob(revisionId: number): Promise<Blob> {
-  return apiFetchBlob(dataContractRevisionPreviewPath(revisionId));
+  const { blob } = await apiFetchBlob(dataContractRevisionPreviewPath(revisionId));
+  return blob;
 }
 
 export async function downloadContractRevisionPdf(
   revisionId: number,
   fallbackFileName: string,
 ): Promise<void> {
-  const blob = await apiFetchBlob(dataContractRevisionDownloadPath(revisionId));
+  const { blob } = await apiFetchBlob(dataContractRevisionDownloadPath(revisionId));
   const url = URL.createObjectURL(blob);
   try {
     const a = document.createElement("a");

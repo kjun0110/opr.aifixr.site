@@ -2,6 +2,7 @@ export { API_PREFIX, PATH_API_TEST, PATH_HEALTH } from "./paths";
 export {
   apiFetch,
   apiFetchBlob,
+  parseContentDispositionFilename,
   apiUrl,
   getApiBase,
   getApiTest,

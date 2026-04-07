@@ -173,11 +173,34 @@ export async function apiFetch<T = unknown>(
   return (await res.text()) as T;
 }
 
+/** Content-Disposition에서 저장 파일명 추출 (filename*=UTF-8 우선) */
+export function parseContentDispositionFilename(headerValue: string | null): string | null {
+  if (!headerValue) return null;
+  const star = /filename\*=(?:UTF-8''|utf-8'')([^;\n]+)/i.exec(headerValue);
+  if (star) {
+    const raw = star[1].trim().replace(/^"+|"+$/g, "");
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw || null;
+    }
+  }
+  const quoted = /filename="((?:\\.|[^"\\])*)"/i.exec(headerValue);
+  if (quoted) {
+    return quoted[1].replace(/\\(.)/g, "$1");
+  }
+  const unquoted = /filename=([^;\n]+)/i.exec(headerValue);
+  if (unquoted) {
+    return unquoted[1].trim().replace(/^"+|"+$/g, "");
+  }
+  return null;
+}
+
 /** PDF 등 바이너리 응답 (Authorization·401 재시도 동일) */
 export async function apiFetchBlob(
   path: string,
   options: ApiClientOptions = {},
-): Promise<Blob> {
+): Promise<{ blob: Blob; filename: string | null }> {
   const { json, headers: initHeaders, retryOn401 = true, ...rest } = options;
   const headers = new Headers(initHeaders);
 
@@ -241,7 +264,9 @@ export async function apiFetchBlob(
     throw new Error(`API ${res.status}: ${text || res.statusText}`);
   }
 
-  return res.blob();
+  const filename = parseContentDispositionFilename(res.headers.get("Content-Disposition"));
+  const blob = await res.blob();
+  return { blob, filename };
 }
 
 /** 앱 로드 시 리프레시 쿠키가 있으면 액세스 토큰·actor 복구 */

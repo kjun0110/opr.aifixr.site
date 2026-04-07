@@ -14,6 +14,7 @@ import {
   getOprPcfReadiness,
   type OprPcfReadinessResponse,
 } from '@/lib/api/dataMgmtOpr';
+import { postOprPcfRunExecute } from '@/lib/api/pcf';
 
 /** 데이터 관리(DataView)와 동일: 공급망 API로 고객→지사→제품→세부제품 스캐폴드 */
 type ScaffoldVariantRow = {
@@ -857,35 +858,81 @@ export default function PcfCalculation() {
   ], []);
 
   // 부분산정 실행
-  const handlePartialCalculate = () => {
+  const handlePartialCalculate = async () => {
     if (!canPartialCalculate) {
       toast.error('부분산정 조건이 충족되지 않았습니다');
       return;
     }
     const vid = Number(selectedDetailProduct);
-    if (Number.isFinite(vid) && selectedMonth) {
+    const pid = Number(selectedProduct);
+    const projectId = selectedDetailMeta?.projectId ?? null;
+    if (!Number.isFinite(vid) || !Number.isFinite(pid) || !projectId || !selectedMonth) {
+      toast.error('산정 대상(project/product/variant/month) 정보가 없습니다.');
+      return;
+    }
+    const [yRaw, mRaw] = selectedMonth.split('-');
+    const ry = Number(yRaw);
+    const rm = Number(mRaw);
+    if (!Number.isFinite(ry) || !Number.isFinite(rm)) {
+      toast.error('조회 월 형식이 올바르지 않습니다.');
+      return;
+    }
+    try {
+      await postOprPcfRunExecute({
+        project_id: projectId,
+        product_id: pid,
+        product_variant_id: vid,
+        reporting_year: ry,
+        reporting_month: rm,
+        calculation_mode: 'partial',
+      });
       writeMonthRunState(vid, selectedMonth, { partial: true });
       setMonthRunState(readMonthRunState(vid, selectedMonth));
+      setCurrentResult('partial');
+      setShowResult(true);
+      toast.success('부분산정을 실행했습니다.');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : '부분산정 실행에 실패했습니다.');
     }
-    setCurrentResult('partial');
-    setShowResult(true);
-    toast.success('부분산정을 실행합니다 (자사 데이터만 반영)');
   };
 
   // 최종산정 실행
-  const handleFinalCalculate = () => {
+  const handleFinalCalculate = async () => {
     if (!canFinalCalculate) {
       toast.error('최종산정 조건이 충족되지 않았습니다');
       return;
     }
     const vid = Number(selectedDetailProduct);
-    if (Number.isFinite(vid) && selectedMonth) {
+    const pid = Number(selectedProduct);
+    const projectId = selectedDetailMeta?.projectId ?? null;
+    if (!Number.isFinite(vid) || !Number.isFinite(pid) || !projectId || !selectedMonth) {
+      toast.error('산정 대상(project/product/variant/month) 정보가 없습니다.');
+      return;
+    }
+    const [yRaw, mRaw] = selectedMonth.split('-');
+    const ry = Number(yRaw);
+    const rm = Number(mRaw);
+    if (!Number.isFinite(ry) || !Number.isFinite(rm)) {
+      toast.error('조회 월 형식이 올바르지 않습니다.');
+      return;
+    }
+    try {
+      await postOprPcfRunExecute({
+        project_id: projectId,
+        product_id: pid,
+        product_variant_id: vid,
+        reporting_year: ry,
+        reporting_month: rm,
+        calculation_mode: 'final',
+      });
       writeMonthRunState(vid, selectedMonth, { partial: true, final: true });
       setMonthRunState(readMonthRunState(vid, selectedMonth));
+      setCurrentResult('final');
+      setShowResult(true);
+      toast.success('최종 PCF 산정을 실행했습니다.');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : '최종 PCF 산정 실행에 실패했습니다.');
     }
-    setCurrentResult('final');
-    setShowResult(true);
-    toast.success('최종 PCF 산정을 실행합니다');
   };
 
   // 부분산정 불러오기

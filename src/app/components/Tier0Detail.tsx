@@ -535,10 +535,10 @@ export default function Tier0Detail() {
   const { mode } = useMode();
   const [activeTab, setActiveTab] = useState(1);
   const [showUploadModal, setShowUploadModal] = useState(false);
-  /** 원청사 엑셀 다운로드: 사업장·담당자·설비·기업기본·사업장담당자·자재·에너지·생산 시트 선택 */
+  /** 원청사 엑셀 다운로드: 기업기본·사업장·담당자·설비·사업장담당자·자재·에너지·생산·운송 시트 선택 */
   const [showExcelDownloadModal, setShowExcelDownloadModal] = useState(false);
   const [excelDownloadModalTabIds, setExcelDownloadModalTabIds] = useState<number[]>([
-    1, 2, 3, 8, 4, 5, 6, 7,
+    8, 1, 2, 3, 4, 5, 6, 7, 9,
   ]);
   const [excelExporting, setExcelExporting] = useState(false);
   /** Tier0 엑셀 업로드: 덮어쓰기 | 기존 행 뒤에 추가 */
@@ -959,17 +959,19 @@ export default function Tier0Detail() {
     { id: 2, name: '담당자 정보' },
     { id: 3, name: '설비 정보' },
     { id: 4, name: '사업장 담당자 정보' },
+    { id: 7, name: '생산 정보' },
     { id: 5, name: '자재 정보' },
     { id: 6, name: '에너지 정보' },
-    { id: 7, name: '생산 정보' },
     { id: 10, name: '운송 정보' },
   ];
 
-  const tier0ExcelSheetTabIds: number[] = [1, 2, 3, 8, 4, 5, 6, 7];
+  /** API tier0/export.xlsx 시트 ID (화면 탭 10=운송 과 별도로 운송 시트는 9) */
+  const tier0ExcelSheetTabIds: number[] = [8, 1, 2, 3, 4, 5, 6, 7, 9];
   const tier0ExcelDownloadOptions = [
-    ...tabs.filter((t) => [1, 2, 3].includes(t.id)),
     { id: 8, name: '기업 기본정보' },
+    ...tabs.filter((t) => [1, 2, 3].includes(t.id)),
     ...tabs.filter((t) => [4, 5, 6, 7].includes(t.id)),
+    { id: 9, name: '운송 정보' },
   ];
 
   // 구매 직무: 전체 탭 잠금
@@ -1003,6 +1005,9 @@ export default function Tier0Detail() {
 
   const safeValue = (v: unknown) => (v === null || v === undefined || String(v).trim() === '' ? '-' : String(v));
   const detailProductName = company.productType ?? '';
+  /** 데이터뷰 카드: URL·세션·API `product_variant_name` 우선 — 행에 박힌 목업 제품명보다 우선 */
+  const transportProductDisplayLabel =
+    (detailProductLabel && String(detailProductLabel).trim()) || detailProductName;
   const siteNameOptions = (company.siteInfo ?? []).map((s) => s.siteName).filter(Boolean);
   const processNameOptions = Array.from(
     new Set(
@@ -1038,6 +1043,16 @@ export default function Tier0Detail() {
   const mineralTypeBaseOptions = ['리튬', '니켈', '코발트', '망간', '흑연'];
   const energyTypeBaseOptions = ['전기', '스팀', 'LNG', '경유', '수소'];
   const transportModeBaseOptions = ['육운', '해운', '항공', '철도'];
+  const transportFuelTypeBaseOptions = [
+    '경유',
+    '휘발유',
+    '중유',
+    'LNG',
+    'LPG',
+    '전기',
+    '수소',
+  ];
+  const transportFuelQtyUnitBaseOptions = ['kg', 'ton'];
   const materialEfUnitBaseOptions = ['kgCO2e/kg', 'kgCO2e/ton', 'kgCO2e/L', 'kgCO2e/Nm3'];
   const mineralEfUnitBaseOptions = ['kgCO2e/kg', 'kgCO2e/ton'];
   const energyEfUnitBaseOptions = ['kgCO2e/kWh', 'kgCO2e/MJ', 'kgCO2e/Nm3', 'kgCO2e/L'];
@@ -1589,6 +1604,7 @@ export default function Tier0Detail() {
     siteName: '',
     productionAmount: 0,
     productionUnit: PRODUCTION_QTY_UNIT,
+    defectiveAmount: 0,
     wasteAmount: 0,
     wasteAmountUnit: '',
     wasteEmissionFactor: 0,
@@ -1641,6 +1657,9 @@ export default function Tier0Detail() {
     destinationCountry: '',
     destinationAddressDetail: '',
     transportMode: '',
+    transportFuelType: '',
+    transportFuelQty: 0,
+    transportFuelQtyUnit: '',
     transportQty: 0,
     transportQtyUnit: '',
     transportEmissionFactor: 0,
@@ -1702,6 +1721,7 @@ export default function Tier0Detail() {
       siteName: r.site_name ?? '',
       productionAmount: parseQtyCell(r.production_qty),
       productionUnit: PRODUCTION_QTY_UNIT,
+      defectiveAmount: parseQtyCell(r.defective_qty),
       wasteAmount: parseQtyCell(r.waste_qty),
       wasteAmountUnit: r.waste_qty_unit ?? '',
       wasteEmissionFactor: parseQtyCell(r.waste_emission_factor),
@@ -1719,6 +1739,9 @@ export default function Tier0Detail() {
       destinationCountry: r.destination_country ?? '',
       destinationAddressDetail: r.destination_address_detail ?? '',
       transportMode: r.transport_mode ?? '',
+      transportFuelType: r.transport_fuel_type ?? '',
+      transportFuelQty: parseQtyCell(r.transport_fuel_qty),
+      transportFuelQtyUnit: r.transport_fuel_qty_unit ?? '',
       transportQty: parseQtyCell(r.transport_qty),
       transportQtyUnit: r.transport_qty_unit ?? '',
       transportEmissionFactor: parseQtyCell(r.transport_emission_factor),
@@ -1767,6 +1790,7 @@ export default function Tier0Detail() {
       siteName: company.siteInfo?.[0]?.siteName ?? '',
       productionAmount: p.output ?? 0,
       productionUnit: PRODUCTION_QTY_UNIT,
+      defectiveAmount: 0,
       wasteAmount: p.waste ?? 0,
       wasteEmissionFactor: p.emissionFactor ?? 0,
       wasteEmissionFactorUnit: '',
@@ -1858,7 +1882,7 @@ export default function Tier0Detail() {
       if (typeof window !== 'undefined' && !getOprAccessToken()) {
         await restoreOprSessionFromCookie();
       }
-      const blob = await downloadOprTier0ExportXlsx({
+      const { blob, filename: serverFilename } = await downloadOprTier0ExportXlsx({
         custBranchId: tier0CardParsed.custBranchId,
         productVariantId: tier0CardParsed.productVariantId,
         reportingYear,
@@ -1883,7 +1907,7 @@ export default function Tier0Detail() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${base}.xlsx`;
+      a.download = serverFilename ?? `${base}.xlsx`;
       a.rel = 'noopener';
       document.body.appendChild(a);
       a.click();
@@ -1966,6 +1990,7 @@ export default function Tier0Detail() {
       site_name: r.siteName,
       production_qty: String(r.productionAmount ?? ''),
       production_qty_unit: PRODUCTION_QTY_UNIT,
+      defective_qty: String(r.defectiveAmount ?? ''),
       waste_qty: String(r.wasteAmount ?? ''),
       waste_qty_unit: r.wasteAmountUnit,
       waste_emission_factor: String(r.wasteEmissionFactor ?? ''),
@@ -1978,6 +2003,9 @@ export default function Tier0Detail() {
       destination_country: r.destinationCountry,
       destination_address_detail: r.destinationAddressDetail,
       transport_mode: r.transportMode,
+      transport_fuel_type: r.transportFuelType ?? '',
+      transport_fuel_qty: String(r.transportFuelQty ?? ''),
+      transport_fuel_qty_unit: r.transportFuelQtyUnit ?? '',
       transport_qty: String(r.transportQty ?? ''),
       transport_qty_unit: r.transportQtyUnit,
       transport_emission_factor: String(r.transportEmissionFactor ?? ''),
@@ -3257,6 +3285,7 @@ export default function Tier0Detail() {
                       <th className={SUP_DETAIL_TH}>사업장명</th>
                       <th className={SUP_DETAIL_TH}>생산량</th>
                       <th className={SUP_DETAIL_TH}>생산량 단위</th>
+                      <th className={SUP_DETAIL_TH}>불량품 수량</th>
                       <th className={SUP_DETAIL_TH}>폐기물량</th>
                       <th className={SUP_DETAIL_TH}>폐기물량 단위</th>
                       <th className={SUP_DETAIL_TH}>폐기물 배출계수</th>
@@ -3296,6 +3325,9 @@ export default function Tier0Detail() {
                             <div className={cellShellClass} style={{ color: 'var(--aifix-navy)' }}>
                               <span className="min-w-0 flex-1 truncate text-gray-700">{PRODUCTION_QTY_UNIT}</span>
                             </div>
+                          </td>
+                          <td className={SUP_DETAIL_TD}>
+                            {renderProductionValueContent(idx, 'defectiveAmount', row.defectiveAmount)}
                           </td>
                           <td className={SUP_DETAIL_TD}>{renderProductionValueContent(idx, 'wasteAmount', row.wasteAmount)}</td>
                           <td className={SUP_DETAIL_TD}>
@@ -3388,7 +3420,7 @@ export default function Tier0Detail() {
                       ))
                     ) : (
                       <tr>
-                        <td colSpan={isTabEditable(7) ? 9 : 8} className="px-4 py-8 text-center text-gray-500">
+                        <td colSpan={isTabEditable(7) ? 10 : 9} className="px-4 py-8 text-center text-gray-500">
                           생산 정보가 없습니다.
                         </td>
                       </tr>
@@ -3419,6 +3451,13 @@ export default function Tier0Detail() {
               {isTabEditable(10) && (
                 <div className="flex items-center gap-2">
                   <button
+                    onClick={handleExcelUpload}
+                    className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 cursor-pointer transition-colors flex items-center gap-2"
+                  >
+                    <Upload className="w-4 h-4" />
+                    파일 업로드
+                  </button>
+                  <button
                     onClick={handleAddRow}
                     className="px-4 py-2 text-sm text-white rounded-lg flex items-center gap-2 transition-all cursor-pointer"
                     style={{ background: 'linear-gradient(90deg, #5B3BFA 0%, #00B4FF 100%)' }}
@@ -3439,12 +3478,15 @@ export default function Tier0Detail() {
               <table className={SUP_DETAIL_TABLE_EDITABLE}>
                 <thead>
                   <tr>
-                    <th className={SUP_DETAIL_TH}>제품명</th>
+                    <th className={SUP_DETAIL_TH}>세부제품명</th>
                     <th className={SUP_DETAIL_TH}>출발지 국가</th>
                     <th className={SUP_DETAIL_TH}>출발지 상세 주소</th>
                     <th className={SUP_DETAIL_TH}>도착지 국가</th>
                     <th className={SUP_DETAIL_TH}>도착지 상세주소</th>
                     <th className={SUP_DETAIL_TH}>운송수단</th>
+                    <th className={SUP_DETAIL_TH}>사용 연료</th>
+                    <th className={SUP_DETAIL_TH}>사용 연료량</th>
+                    <th className={SUP_DETAIL_TH}>사용 연료량 단위</th>
                     <th className={SUP_DETAIL_TH}>운송 물량</th>
                     <th className={SUP_DETAIL_TH}>물량 단위</th>
                     <th className={SUP_DETAIL_TH}>운송 배출계수</th>
@@ -3456,7 +3498,7 @@ export default function Tier0Detail() {
                   {(editableTransportRows ?? []).length > 0 ? (
                     editableTransportRows.map((row, idx) => (
                       <tr key={row.rowId ?? idx} className="group hover:bg-gray-50 transition-colors">
-                        <td className={SUP_DETAIL_TD}>{safeValue(row.detailProductName || detailProductName)}</td>
+                        <td className={SUP_DETAIL_TD}>{safeValue(transportProductDisplayLabel)}</td>
                         <td className={SUP_DETAIL_TD}>
                           {isTabEditable(10) ? (
                             <SearchableCountrySelect
@@ -3507,6 +3549,41 @@ export default function Tier0Detail() {
                             />
                           ) : (
                             safeValue(row.transportMode)
+                          )}
+                        </td>
+                        <td className={SUP_DETAIL_TD}>
+                          {isTabEditable(10) ? (
+                            <SearchableSelectCreatable
+                              value={row.transportFuelType ?? ''}
+                              onChange={(v) =>
+                                setEditableTransportRows((prev) =>
+                                  prev.map((r, i) => (i === idx ? { ...r, transportFuelType: v } : r)),
+                                )
+                              }
+                              baseOptions={transportFuelTypeBaseOptions}
+                              placeholder="사용 연료 검색·추가"
+                            />
+                          ) : (
+                            safeValue(row.transportFuelType)
+                          )}
+                        </td>
+                        <td className={SUP_DETAIL_TD}>
+                          {renderTransportValueContent(idx, 'transportFuelQty', row.transportFuelQty)}
+                        </td>
+                        <td className={SUP_DETAIL_TD}>
+                          {isTabEditable(10) ? (
+                            <SearchableSelectCreatable
+                              value={row.transportFuelQtyUnit ?? ''}
+                              onChange={(v) =>
+                                setEditableTransportRows((prev) =>
+                                  prev.map((r, i) => (i === idx ? { ...r, transportFuelQtyUnit: v } : r)),
+                                )
+                              }
+                              baseOptions={transportFuelQtyUnitBaseOptions}
+                              placeholder="사용 연료량 단위"
+                            />
+                          ) : (
+                            safeValue(row.transportFuelQtyUnit)
                           )}
                         </td>
                         <td className={SUP_DETAIL_TD}>
@@ -3589,7 +3666,7 @@ export default function Tier0Detail() {
                     ))
                   ) : (
                     <tr>
-                      <td colSpan={isTabEditable(10) ? 11 : 10} className="px-4 py-8 text-center text-gray-500">
+                      <td colSpan={isTabEditable(10) ? 14 : 13} className="px-4 py-8 text-center text-gray-500">
                         운송 정보가 없습니다.
                       </td>
                     </tr>
@@ -3864,7 +3941,7 @@ export default function Tier0Detail() {
         ))}
       </datalist>
 
-      {/* 엑셀 다운로드 — 사업장 담당자·자재·에너지·생산 시트 선택 */}
+      {/* 엑셀 다운로드 — 기업기본·사업장~운송 시트 선택 (파일 내 시트 순서는 서버와 동일) */}
       {showExcelDownloadModal && (
         <div
           className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4"
