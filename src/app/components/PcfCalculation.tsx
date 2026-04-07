@@ -1,20 +1,22 @@
 'use client';
 
-import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { ChevronRight, ChevronDown, Download, CheckCircle, Clock, AlertTriangle, FileText, Network, TrendingUp, Play, Info, X, Calculator, History, Eye } from 'lucide-react';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
+import { ChevronRight, ChevronDown, Download, CheckCircle, Clock, AlertTriangle, FileText, Network, TrendingUp, Play, Info, X, Calculator, History, Eye, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
 import * as XLSX from 'xlsx';
 import MonthPicker from './MonthPicker';
 import { useMode } from '../context/ModeContext';
-import { apiFetch, restoreOprSessionFromCookie } from '@/lib/api/client';
+import { actorStorageKey, apiFetch, restoreOprSessionFromCookie } from '@/lib/api/client';
 import { getOprAccessToken } from '@/lib/api/sessionAccessToken';
 import {
   getOprBomPeriod,
   getOprPcfReadiness,
+  postOprDataRequest,
   type OprPcfReadinessResponse,
 } from '@/lib/api/dataMgmtOpr';
-import { postOprPcfRunExecute } from '@/lib/api/pcf';
+import { getOprDataViewContacts } from '@/lib/api/iamOpr';
+import { getOprPcfReadinessForNotify, getOprPcfRuns, postOprPcfRunExecute } from '@/lib/api/pcf';
 
 /** 데이터 관리(DataView)와 동일: 공급망 API로 고객→지사→제품→세부제품 스캐폴드 */
 type ScaffoldVariantRow = {
@@ -822,43 +824,129 @@ export default function PcfCalculation() {
 
   // 부분산정 불러오기 선택
   const [selectedPartialHistory, setSelectedPartialHistory] = useState<string>('');
+  const [executorFallbackName, setExecutorFallbackName] = useState<string>('사용자');
 
-  // Mock 계산 이력
-  const mockHistories: CalculationHistory[] = useMemo(() => [
-    {
-      id: 'hist-1',
-      calculationType: 'final',
-      calculationDate: '2025-02-15 14:32',
-      targetSummary: 'A 자동차 / 국내사업본부 / 배터리 모듈 A / A-1 / BOM_A_001 / 2025-02',
-      status: 'final_completed',
-      productPcf: 32420.3,
-      kgPcf: 0.6484,
-      executor: '김철수',
-    },
-    {
-      id: 'hist-2',
-      calculationType: 'partial',
-      calculationDate: '2025-02-10 10:15',
-      targetSummary: 'A 자동차 / 국내사업본부 / 배터리 모듈 A / A-1 / BOM_A_001 / 2025-02',
-      status: 'partial_saved',
-      productPcf: 8105.0,
-      kgPcf: 0.1621,
-      executor: '김철수',
-    },
-    {
-      id: 'hist-3',
-      calculationType: 'final',
-      calculationDate: '2025-01-28 16:20',
-      targetSummary: 'A 자동차 / 국내사업본부 / 배터리 모듈 A / A-1 / BOM_A_001 / 2025-01',
-      status: 'final_completed',
-      productPcf: 31850.7,
-      kgPcf: 0.6370,
-      executor: '이영희',
-    },
-  ], []);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        if (typeof window !== 'undefined' && !getOprAccessToken()) {
+          await restoreOprSessionFromCookie();
+        }
+        const actorRaw = typeof window !== 'undefined'
+          ? localStorage.getItem(actorStorageKey())
+          : null;
+        const actorId = Number(actorRaw);
+        const resp = await getOprDataViewContacts();
+        const selfRow =
+          resp.rows.find((r) => r.is_self) ??
+          (Number.isFinite(actorId) ? resp.rows.find((r) => r.user_id === actorId) : undefined);
+        const nm = (selfRow?.name || '').trim();
+        if (!cancelled && nm) setExecutorFallbackName(nm);
+      } catch {
+        // 이름 조회 실패 시 기본값 유지
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const [histories, setHistories] = useState<CalculationHistory[]>([]);
+  const [isPartialCalculating, setIsPartialCalculating] = useState(false);
+  const [isRequestingMissingSuppliers, setIsRequestingMissingSuppliers] = useState(false);
+
+  const loadHistoriesFromServer = useCallback(async () => {
+    const projectIds = Array.from(new Set(scaffoldVariants.map((v) => v.projectId))).filter((v) =>
+      Number.isFinite(v),
+    );
+    if (projectIds.length === 0) {
+      setHistories([]);
+      return;
+    }
+    const pad2 = (n: number) => String(n).padStart(2, '0');
+    const runChunks = await Promise.all(
+      projectIds.map((projectId) =>
+        getOprPcfRuns({
+          project_id: projectId,
+          limit: 200,
+          offset: 0,
+        }),
+      ),
+    );
+    const runs = runChunks.flat();
+    const mappedAll: CalculationHistory[] = runs.map((r) => {
+      const asNum = (v: unknown): number | null => {
+        if (typeof v === 'number' && Number.isFinite(v)) return v;
+        if (typeof v === 'string') {
+          const n = Number(v.replace(/,/g, '').trim());
+          if (Number.isFinite(n)) return n;
+        }
+        return null;
+      };
+      const runKind = (r.run_kind || '').trim().toLowerCase();
+      // 원청 백엔드 기준: batch=최종, node_rollup=부분
+      // 예상 밖 값이 와도 "부분" 우선으로 분류해 기존 부분산정 불러오기가 비지 않도록 보정
+      const calculationType: CalculationHistory['calculationType'] =
+        runKind === 'batch' || runKind.includes('final')
+          ? 'final'
+          : 'partial';
+      const status: CalculationHistory['status'] =
+        calculationType === 'final' ? 'final_completed' : 'partial_saved';
+      const monthYm = `${r.reporting_year}-${pad2(r.reporting_month)}`;
+      const variantName =
+        scaffoldVariants.find((v) => v.variantId === (r.product_variant_id ?? -1))?.variantName ||
+        String(r.product_variant_id ?? '-');
+      const tsRaw = (r.finished_at || r.created_at || '').toString();
+      const ts = tsRaw ? tsRaw.slice(0, 16).replace('T', ' ') : monthYm;
+      const declaredPcf = asNum(r.pcf_per_declared_unit_kg);
+      const perMassPcf = asNum(r.pcf_per_product_mass_kg);
+      const totalCo2e = asNum(r.total_co2e_kg);
+      // 일부 게이트웨이/환경에서 pcf_per_* 필드 누락 시 total_co2e를 폴백으로 사용
+      const productPcf = declaredPcf ?? totalCo2e ?? 0;
+      const kgPcf = perMassPcf ?? 0;
+      return {
+        id: `hist-run-${r.id}`,
+        calculationType,
+        calculationDate: ts,
+        targetSummary: `project ${r.project_id} / - / ${r.product_name || '-'} / ${variantName} / ${r.bom_label || '-'} / ${monthYm}`,
+        status,
+        productPcf,
+        kgPcf,
+        executor: r.executed_by_name?.trim() || (r.triggered_by_user_id ? `사용자#${r.triggered_by_user_id}` : executorFallbackName),
+      };
+    });
+    // 동일 대상/월/산정유형은 최신 실행 1건만 노출(재실행 시 업데이트 체감)
+    const latestByKey = new Map<string, CalculationHistory>();
+    for (const row of mappedAll) {
+      const key = `${row.calculationType}|${row.targetSummary}`;
+      const prev = latestByKey.get(key);
+      if (!prev) {
+        latestByKey.set(key, row);
+        continue;
+      }
+      const curNum = Number(row.id.replace('hist-run-', ''));
+      const prevNum = Number(prev.id.replace('hist-run-', ''));
+      if (Number.isFinite(curNum) && Number.isFinite(prevNum) && curNum > prevNum) {
+        latestByKey.set(key, row);
+      }
+    }
+    setHistories(Array.from(latestByKey.values()).sort((a, b) => {
+      const an = Number(a.id.replace('hist-run-', ''));
+      const bn = Number(b.id.replace('hist-run-', ''));
+      return bn - an;
+    }));
+  }, [scaffoldVariants, executorFallbackName]);
+
+  useEffect(() => {
+    void loadHistoriesFromServer().catch(() => {
+      setHistories([]);
+    });
+  }, [loadHistoriesFromServer]);
 
   // 부분산정 실행
   const handlePartialCalculate = async () => {
+    if (isPartialCalculating) return;
     if (!canPartialCalculate) {
       toast.error('부분산정 조건이 충족되지 않았습니다');
       return;
@@ -877,8 +965,9 @@ export default function PcfCalculation() {
       toast.error('조회 월 형식이 올바르지 않습니다.');
       return;
     }
+    setIsPartialCalculating(true);
     try {
-      await postOprPcfRunExecute({
+      const runResult = await postOprPcfRunExecute({
         project_id: projectId,
         product_id: pid,
         product_variant_id: vid,
@@ -890,9 +979,15 @@ export default function PcfCalculation() {
       setMonthRunState(readMonthRunState(vid, selectedMonth));
       setCurrentResult('partial');
       setShowResult(true);
-      toast.success('부분산정을 실행했습니다.');
+      const now = new Date();
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const ts = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+      await loadHistoriesFromServer();
+      toast.success('부분산정 실행 및 저장이 완료되었습니다.');
     } catch (e) {
       toast.error(e instanceof Error ? e.message : '부분산정 실행에 실패했습니다.');
+    } finally {
+      setIsPartialCalculating(false);
     }
   };
 
@@ -917,7 +1012,7 @@ export default function PcfCalculation() {
       return;
     }
     try {
-      await postOprPcfRunExecute({
+      const runResult = await postOprPcfRunExecute({
         project_id: projectId,
         product_id: pid,
         product_variant_id: vid,
@@ -929,6 +1024,10 @@ export default function PcfCalculation() {
       setMonthRunState(readMonthRunState(vid, selectedMonth));
       setCurrentResult('final');
       setShowResult(true);
+      const now = new Date();
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const ts = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+      await loadHistoriesFromServer();
       toast.success('최종 PCF 산정을 실행했습니다.');
     } catch (e) {
       toast.error(e instanceof Error ? e.message : '최종 PCF 산정 실행에 실패했습니다.');
@@ -941,12 +1040,68 @@ export default function PcfCalculation() {
       toast.error('불러올 부분산정 기록을 선택해주세요');
       return;
     }
-    toast.info('부분산정 기록을 불러왔습니다');
+    const loaded = histories.find((h) => h.id === selectedPartialHistory);
+    if (!loaded) {
+      toast.error('선택한 부분산정 기록을 찾을 수 없습니다.');
+      return;
+    }
+    setCurrentResult('partial');
+    setShowResult(true);
+    toast.success('부분산정 기록을 불러왔습니다.');
   };
 
   // 미입력 협력사 요청
-  const handleRequestMissingSuppliers = () => {
-    toast.info(`미입력 협력사 ${missingSuppliers}곳에 데이터 제출 요청을 발송합니다`);
+  const handleRequestMissingSuppliers = async () => {
+    if (isRequestingMissingSuppliers) return;
+    const vid = Number(selectedDetailProduct);
+    const pid = Number(selectedProduct);
+    const projectId = selectedDetailMeta?.projectId ?? null;
+    if (!Number.isFinite(vid) || !Number.isFinite(pid) || !projectId || !selectedMonth) {
+      toast.error('요청 대상(project/product/variant/month) 정보가 없습니다.');
+      return;
+    }
+    const [yRaw, mRaw] = selectedMonth.split('-');
+    const ry = Number(yRaw);
+    const rm = Number(mRaw);
+    if (!Number.isFinite(ry) || !Number.isFinite(rm)) {
+      toast.error('조회 월 형식이 올바르지 않습니다.');
+      return;
+    }
+    try {
+      setIsRequestingMissingSuppliers(true);
+      const rd = await getOprPcfReadinessForNotify({
+        project_id: projectId,
+        product_id: pid,
+        product_variant_id: vid,
+        reporting_year: ry,
+        reporting_month: rm,
+      });
+      const targetNodeIds = rd.suppliers
+        .filter((s) => !s.ready)
+        .map((s) => s.supply_chain_node_id);
+      if (targetNodeIds.length === 0) {
+        toast.info('현재 월 기준 미입력 협력사가 없습니다.');
+        return;
+      }
+      const actorIdRaw = typeof window !== 'undefined' ? localStorage.getItem(actorStorageKey()) : null;
+      const actorId = Number(actorIdRaw);
+      await postOprDataRequest({
+        project_id: projectId,
+        product_id: pid,
+        product_variant_id: vid,
+        reporting_year: ry,
+        reporting_month: rm,
+        requested_by_user_id: Number.isFinite(actorId) ? actorId : undefined,
+        request_mode: 'chain',
+        message: '데이터를 입력하고 PCF 최종산정을 준비해주세요',
+        target_supply_chain_node_ids: targetNodeIds,
+      });
+      toast.success(`미입력 협력사 ${targetNodeIds.length}곳에 요청 알림을 발송했습니다.`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : '미입력 협력사 요청 발송에 실패했습니다.');
+    } finally {
+      setIsRequestingMissingSuppliers(false);
+    }
   };
 
   // 트리 토글
@@ -1002,11 +1157,11 @@ export default function PcfCalculation() {
   };
 
   const toggleSelectAllHistories = () => {
-    if (selectedHistoryIds.size === mockHistories.length) {
+    if (selectedHistoryIds.size === histories.length) {
       setSelectedHistoryIds(new Set());
       return;
     }
-    setSelectedHistoryIds(new Set(mockHistories.map((h) => h.id)));
+    setSelectedHistoryIds(new Set(histories.map((h) => h.id)));
   };
 
   const startHistoryDownloadSelection = () => {
@@ -1025,7 +1180,7 @@ export default function PcfCalculation() {
       return;
     }
 
-    const selectedRows = mockHistories.filter((h) => selectedHistoryIds.has(h.id));
+    const selectedRows = histories.filter((h) => selectedHistoryIds.has(h.id));
     const typeLabel = (type: CalculationHistory['calculationType']) =>
       type === 'partial' ? '부분산정' : '최종산정';
     const statusLabel = (status: CalculationHistory['status']) => {
@@ -1211,106 +1366,46 @@ export default function PcfCalculation() {
     children?: CompanyResult[];
   }
 
+  const activeResultHistory = useMemo(() => {
+    if (!currentResult) return null;
+    if (currentResult === 'partial' && selectedPartialHistory) {
+      const picked = histories.find((h) => h.id === selectedPartialHistory);
+      if (picked) return picked;
+    }
+    return histories.find((h) => h.calculationType === currentResult) ?? null;
+  }, [currentResult, selectedPartialHistory, histories]);
+
   const mockCompanyResults: CompanyResult[] = useMemo(() => {
+    if (!activeResultHistory || !currentResult) return [];
     if (currentResult === 'partial') {
-      // 부분산정: 자사만 데이터 있음
       return [
         {
           id: 'prime',
           companyName: 'LG에너지솔루션 (원청사)',
           tier: 0,
-          ownEmission: 8105.0,
+          ownEmission: activeResultHistory.productPcf,
           supplierEmission: 0,
           transportEmission: 0,
-          finalPcf: 8105.0,
+          finalPcf: activeResultHistory.productPcf,
           status: 'partial',
         },
       ];
     } else if (currentResult === 'final') {
-      // 최종산정: 전체 공급망 데이터
       return [
         {
           id: 'prime',
           companyName: 'LG에너지솔루션 (원청사)',
           tier: 0,
-          ownEmission: 8105.0,
-          supplierEmission: 22315.3,
-          transportEmission: 2000.0,
-          finalPcf: 32420.3,
+          ownEmission: activeResultHistory.productPcf,
+          supplierEmission: 0,
+          transportEmission: 0,
+          finalPcf: activeResultHistory.productPcf,
           status: 'final',
-          children: [
-            {
-              id: 'tier1-1',
-              companyName: '한국배터리',
-              tier: 1,
-              ownEmission: 4200.0,
-              supplierEmission: 10800.8,
-              transportEmission: 200.0,
-              finalPcf: 15200.8,
-              status: 'final',
-              children: [
-                {
-                  id: 'tier2-1',
-                  companyName: '셀테크',
-                  tier: 2,
-                  ownEmission: 5300.0,
-                  supplierEmission: 3000.0,
-                  transportEmission: 200.0,
-                  finalPcf: 8500.0,
-                  status: 'final',
-                  children: [
-                    {
-                      id: 'tier3-1',
-                      companyName: '리튬소재',
-                      tier: 3,
-                      ownEmission: 3200.0,
-                      supplierEmission: 0,
-                      transportEmission: 0,
-                      finalPcf: 3200.0,
-                      status: 'final',
-                    },
-                  ],
-                },
-                {
-                  id: 'tier2-2',
-                  companyName: '글로벌소재',
-                  tier: 2,
-                  ownEmission: 4000.3,
-                  supplierEmission: 0,
-                  transportEmission: 200.0,
-                  finalPcf: 4200.3,
-                  status: 'final',
-                },
-              ],
-            },
-            {
-              id: 'tier1-2',
-              companyName: '파워셀 테크놀로지',
-              tier: 1,
-              ownEmission: 3600.0,
-              supplierEmission: 2000.0,
-              transportEmission: 200.0,
-              finalPcf: 5800.0,
-              status: 'final',
-              children: [
-                {
-                  id: 'tier2-3',
-                  companyName: '아시아소재',
-                  tier: 2,
-                  ownEmission: 2000.0,
-                  supplierEmission: 0,
-                  transportEmission: 200.0,
-                  finalPcf: 2200.0,
-                  status: 'final',
-                },
-              ],
-            },
-          ],
         },
       ];
     }
     return [];
-  }, [currentResult]);
+  }, [activeResultHistory, currentResult]);
 
   // 협력사별 기여도 계산 (최종산정 시)
   const supplierContributions = useMemo(() => {
@@ -1697,10 +1792,10 @@ export default function PcfCalculation() {
                     </span>
                     <button
                       onClick={handleRequestMissingSuppliers}
-                      disabled={pcfReadinessLoading || missingSuppliers === 0}
+                      disabled={pcfReadinessLoading || missingSuppliers === 0 || isRequestingMissingSuppliers}
                       className="px-3 py-1.5 text-xs border border-[#00B4FF] text-[#00B4FF] rounded-lg hover:bg-blue-50 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                      미입력 협력사 요청
+                      {isRequestingMissingSuppliers ? '요청 발송 중...' : '미입력 협력사 요청'}
                     </button>
                   </div>
                 </div>
@@ -1741,14 +1836,23 @@ export default function PcfCalculation() {
                 </p>
                 <button
                   onClick={handlePartialCalculate}
-                  disabled={!canPartialCalculate}
-                  className={`w-full px-4 py-3 rounded-lg font-semibold flex items-center justify-center gap-2 transition-all ${canPartialCalculate
+                  disabled={!canPartialCalculate || isPartialCalculating}
+                  className={`w-full px-4 py-3 rounded-lg font-semibold flex items-center justify-center gap-2 transition-all ${canPartialCalculate && !isPartialCalculating
                       ? 'bg-gradient-to-r from-orange-400 to-orange-600 text-white hover:scale-105'
                       : 'bg-gray-200 text-gray-400 cursor-not-allowed'
                     }`}
                 >
-                  <Play className="w-5 h-5" />
-                  부분산정 실행
+                  {isPartialCalculating ? (
+                    <>
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                      부분산정 실행 중...
+                    </>
+                  ) : (
+                    <>
+                      <Play className="w-5 h-5" />
+                      부분산정 실행
+                    </>
+                  )}
                 </button>
               </div>
 
@@ -1797,14 +1901,29 @@ export default function PcfCalculation() {
                 className="flex-1 px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5B3BFA]"
               >
                 <option value="">부분산정 기록 선택</option>
-                {mockHistories
-                  .filter((h) => h.calculationType === 'partial')
-                  .map((h) => (
-                    <option key={h.id} value={h.id}>
-                      {h.calculationDate} - {h.targetSummary.split(' / ').slice(-1)[0]} (제품 PCF:{' '}
-                      {h.productPcf.toLocaleString()} kgCO₂e)
-                    </option>
-                  ))}
+                {(() => {
+                  const partialHistories = histories.filter((h) => h.calculationType === 'partial');
+                  if (partialHistories.length === 0) {
+                    return (
+                      <option value="" disabled>
+                        부분산정 이력이 없습니다. 부분산정 실행 후 다시 확인해 주세요.
+                      </option>
+                    );
+                  }
+                  return partialHistories.map((h) => {
+                    const parts = h.targetSummary.split(' / ');
+                    const projectRaw = (parts[0] ?? '-').trim();
+                    const projectLabel = /^\d+$/.test(projectRaw) ? `project ${projectRaw}` : projectRaw;
+                    const detailLabel = parts[3] ?? '-';
+                    const monthLabel = parts[parts.length - 1] ?? '-';
+                    return (
+                      <option key={h.id} value={h.id}>
+                        {monthLabel}/{projectLabel}/{detailLabel} (제품 PCF:{' '}
+                        {h.productPcf.toLocaleString()} kgCO₂e)
+                      </option>
+                    );
+                  });
+                })()}
               </select>
               <button
                 onClick={handleLoadPartialHistory}
@@ -1865,7 +1984,7 @@ export default function PcfCalculation() {
                   <div className="p-4 rounded-xl bg-emerald-50">
                     <div className="text-sm text-gray-600 mb-1">kg 기준 PCF</div>
                     <div className="text-3xl font-extrabold text-emerald-700">
-                      {(mockCompanyResults[0].finalPcf / 50000).toFixed(4)} kgCO₂e/kg
+                      {(activeResultHistory?.kgPcf ?? 0).toFixed(4)} kgCO₂e/kg
                     </div>
                   </div>
                 </div>
@@ -2057,7 +2176,7 @@ export default function PcfCalculation() {
                     <th className="px-4 py-3 text-center text-xs font-semibold">
                       <input
                         type="checkbox"
-                        checked={selectedHistoryIds.size === mockHistories.length && mockHistories.length > 0}
+                        checked={selectedHistoryIds.size === histories.length && histories.length > 0}
                         onChange={toggleSelectAllHistories}
                         aria-label="전체 선택"
                       />
@@ -2074,7 +2193,7 @@ export default function PcfCalculation() {
                 </tr>
               </thead>
               <tbody>
-                {mockHistories.map((hist, idx) => (
+                {histories.map((hist, idx) => (
                   <tr
                     key={hist.id}
                     className={`border-b border-gray-100 hover:bg-blue-50 ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'
@@ -2156,7 +2275,7 @@ export default function PcfCalculation() {
             </table>
           </div>
 
-          {mockHistories.length === 0 && (
+          {histories.length === 0 && (
             <div className="p-12 text-center">
               <History className="w-16 h-16 mx-auto mb-4 text-gray-300" />
               <p className="text-gray-500 text-lg">산정 대상 선택 후 계산을 실행해 주세요.</p>
@@ -2352,7 +2471,7 @@ export default function PcfCalculation() {
 
       {/* 히스토리 상세보기 모달 */}
       {historyDetailModal.open && historyDetailModal.historyId && (() => {
-        const history = mockHistories.find(h => h.id === historyDetailModal.historyId);
+        const history = histories.find(h => h.id === historyDetailModal.historyId);
         if (!history) return null;
 
         const isPartial = history.calculationType === 'partial';

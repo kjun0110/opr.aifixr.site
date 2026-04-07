@@ -509,24 +509,53 @@ function parseDataViewTier0CardKey(rawKey: string): {
   } catch {
     /* keep rawKey */
   }
-  const m = decoded.match(/^card-(\d+)-(\d+)-(\d+)-(\d{4}-\d{2})-tier0$/);
-  if (!m) return null;
-  return {
-    custBranchId: parseInt(m[1], 10),
-    productVariantId: parseInt(m[2], 10),
-    cardIdx: parseInt(m[3], 10),
-    yearMonth: m[4],
-  };
+  // 구형: card-{custBranchId}-{productVariantId}-{cardIdx}-{YYYY-MM}-tier0
+  // 신형: card-{custBranchId}-{productVariantId}-{YYYY-MM}-tier0
+  const oldFmt = decoded.match(/^card-(\d+)-(\d+)-(\d+)-(\d{4}-\d{2})-tier0$/);
+  if (oldFmt) {
+    return {
+      custBranchId: parseInt(oldFmt[1], 10),
+      productVariantId: parseInt(oldFmt[2], 10),
+      cardIdx: parseInt(oldFmt[3], 10),
+      yearMonth: oldFmt[4],
+    };
+  }
+  const newFmt = decoded.match(/^card-(\d+)-(\d+)-(\d{4}-\d{2})-tier0$/);
+  if (newFmt) {
+    return {
+      custBranchId: parseInt(newFmt[1], 10),
+      productVariantId: parseInt(newFmt[2], 10),
+      cardIdx: 0,
+      yearMonth: newFmt[3],
+    };
+  }
+  return null;
 }
 
 function tier0NewRowId(): string {
   return `row-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
 
+function parseLooseNumber(raw: unknown): number | null {
+  if (raw == null) return null;
+  const s = String(raw).trim();
+  if (!s) return null;
+  // "200kg", "1,200.5" 같은 입력도 숫자 부분만 안전하게 해석
+  const normalized = s.replace(/,/g, '').replace(/[^0-9.-]/g, '');
+  if (!normalized || normalized === '-' || normalized === '.' || normalized === '-.') return null;
+  const n = Number(normalized);
+  return Number.isFinite(n) ? n : null;
+}
+
 function parseQtyCell(raw: string | undefined): number {
-  if (raw == null || String(raw).trim() === '') return 0;
-  const n = Number(String(raw).replace(/,/g, '').trim());
-  return Number.isFinite(n) ? n : 0;
+  const n = parseLooseNumber(raw);
+  return n ?? 0;
+}
+
+function toSafeQtyString(raw: unknown): string {
+  const n = parseLooseNumber(raw);
+  if (n === null) return '';
+  return String(n);
 }
 
 export default function Tier0Detail() {
@@ -546,6 +575,8 @@ export default function Tier0Detail() {
     'overwrite',
   );
   const [tier0ImportBusy, setTier0ImportBusy] = useState(false);
+  const [tier0SelectedExcelFile, setTier0SelectedExcelFile] = useState<File | null>(null);
+  const [tier0Dragging, setTier0Dragging] = useState(false);
   const tier0ExcelFileInputRef = useRef<HTMLInputElement>(null);
   const [eprPickerTarget, setEprPickerTarget] = useState<{
     kind: 'material' | 'mineral' | 'energy' | 'production' | 'transport';
@@ -658,6 +689,7 @@ export default function Tier0Detail() {
   const [oprDataViewContacts, setOprDataViewContacts] = useState<OprDataViewContactRow[] | null>(
     null,
   );
+  const [sessionHeader, setSessionHeader] = useState<Record<string, unknown>>({});
 
   useEffect(() => {
     const key = typeof companyKey === 'string' ? companyKey : String(companyKey ?? '');
@@ -728,6 +760,21 @@ export default function Tier0Detail() {
       cancelled = true;
     };
   }, [isDataViewTier0Card]);
+
+  useEffect(() => {
+    // Hydration mismatch 방지: sessionStorage는 마운트 후에만 읽는다.
+    if (typeof window === 'undefined') return;
+    try {
+      const raw = window.sessionStorage.getItem('aifix_data_view_filters_v1');
+      if (!raw) {
+        setSessionHeader({});
+        return;
+      }
+      setSessionHeader(JSON.parse(raw) as Record<string, unknown>);
+    } catch {
+      setSessionHeader({});
+    }
+  }, []);
 
   const pickAnchor = (rec: OprAnchorCompanyResponse, k: keyof OprAnchorCompanyResponse, camel: string): string | null | undefined => {
     const raw = rec[k] ?? (rec as unknown as Record<string, unknown>)[camel];
@@ -895,16 +942,6 @@ export default function Tier0Detail() {
     return { yearMonth: valid ? yearMonth : '', customer, branch, product, detailProduct };
   })();
 
-  const sessionHeader = (() => {
-    try {
-      const raw = sessionStorage.getItem('aifix_data_view_filters_v1');
-      if (!raw) return {};
-      return JSON.parse(raw) as Record<string, unknown>;
-    } catch {
-      return {};
-    }
-  })();
-
   const contractPeriodLabelFromSession =
     String(sessionHeader.selectedContractPeriodLabel ?? '') ||
     (sessionHeader.selectedPeriodStart && sessionHeader.selectedPeriodEnd
@@ -966,11 +1003,11 @@ export default function Tier0Detail() {
   ];
 
   /** API tier0/export.xlsx 시트 ID (화면 탭 10=운송 과 별도로 운송 시트는 9) */
-  const tier0ExcelSheetTabIds: number[] = [8, 1, 2, 3, 4, 5, 6, 7, 9];
+  const tier0ExcelSheetTabIds: number[] = [8, 1, 2, 3, 4, 7, 5, 6, 9];
   const tier0ExcelDownloadOptions = [
     { id: 8, name: '기업 기본정보' },
     ...tabs.filter((t) => [1, 2, 3].includes(t.id)),
-    ...tabs.filter((t) => [4, 5, 6, 7].includes(t.id)),
+    ...tabs.filter((t) => [4, 7, 5, 6].includes(t.id)),
     { id: 9, name: '운송 정보' },
   ];
 
@@ -1020,28 +1057,28 @@ export default function Tier0Detail() {
       ].filter(Boolean),
     ),
   );
-  /** 투입 자재명 제안: DB `opr_supply_contracts`(데이터뷰) 또는 mock `tier1Contract`; 검색·신규 추가는 동일 */
-  const materialNameTier1ContractOptions = useMemo(() => {
-    if (isDataViewTier0Card && tier0RowFetched) {
-      return [...(tier0RowContext?.tier1_contract_supplied_item_names ?? [])];
-    }
-    return Array.from(
-      new Set(
-        (company.materialInfo ?? [])
-          .filter((m) => m.tier1Contract === true)
-          .map((m) => String(m.materialName ?? '').trim())
-          .filter(Boolean),
-      ),
-    );
-  }, [
-    isDataViewTier0Card,
-    tier0RowFetched,
-    tier0RowContext?.tier1_contract_supplied_item_names,
-    company.materialInfo,
-  ]);
+  /** 요청 반영: 투입 자재명은 임시 하드코딩 목록만 노출 */
+  const materialNameTier1ContractOptions = useMemo(
+    () => ['전구체', '수산화리튬', '동박(Copper Foil)', 'NCA 양극활물질', '알루미늄 케이스', '포장용 필름'],
+    [],
+  );
   const deliveryAndInputUnitBaseOptions = ['kg', 'g', 'ton', 'ton.km', 'm³', 'm²', 'MJ', 'kWh', 'EA'];
   const mineralTypeBaseOptions = ['리튬', '니켈', '코발트', '망간', '흑연'];
-  const energyTypeBaseOptions = ['전기', '스팀', 'LNG', '경유', '수소'];
+  const energyTypeBaseOptions = [
+    '전기',
+    '스팀',
+    '천연가스',
+    '경유',
+    '등유',
+    '무연탄',
+    '벙커C유',
+    '석탄',
+    '액화석유가스(LPG)',
+    '중유',
+    '휘발유',
+    '공업용수',
+    '상수',
+  ];
   const transportModeBaseOptions = ['육운', '해운', '항공', '철도'];
   const transportFuelTypeBaseOptions = [
     '경유',
@@ -1604,6 +1641,7 @@ export default function Tier0Detail() {
     siteName: '',
     productionAmount: 0,
     productionUnit: PRODUCTION_QTY_UNIT,
+    productUnitCapacityKg: 0,
     defectiveAmount: 0,
     wasteAmount: 0,
     wasteAmountUnit: '',
@@ -1721,6 +1759,7 @@ export default function Tier0Detail() {
       siteName: r.site_name ?? '',
       productionAmount: parseQtyCell(r.production_qty),
       productionUnit: PRODUCTION_QTY_UNIT,
+      productUnitCapacityKg: parseQtyCell(r.product_unit_capacity_kg),
       defectiveAmount: parseQtyCell(r.defective_qty),
       wasteAmount: parseQtyCell(r.waste_qty),
       wasteAmountUnit: r.waste_qty_unit ?? '',
@@ -1790,6 +1829,7 @@ export default function Tier0Detail() {
       siteName: company.siteInfo?.[0]?.siteName ?? '',
       productionAmount: p.output ?? 0,
       productionUnit: PRODUCTION_QTY_UNIT,
+      productUnitCapacityKg: 0,
       defectiveAmount: 0,
       wasteAmount: p.waste ?? 0,
       wasteEmissionFactor: p.emissionFactor ?? 0,
@@ -1923,6 +1963,8 @@ export default function Tier0Detail() {
   };
 
   const handleExcelUpload = () => {
+    setTier0SelectedExcelFile(null);
+    if (tier0ExcelFileInputRef.current) tier0ExcelFileInputRef.current.value = '';
     setShowUploadModal(true);
   };
 
@@ -1965,35 +2007,38 @@ export default function Tier0Detail() {
       detail_product_name: r.detailProductName,
       process_name: r.processName,
       input_material_name: r.inputMaterialName,
-      input_amount: String(r.inputAmount ?? ''),
+      input_amount: toSafeQtyString(r.inputAmount),
       input_amount_unit: r.inputAmountUnit,
-      material_emission_factor: String(r.materialEmissionFactor ?? ''),
+      material_emission_factor: toSafeQtyString(r.materialEmissionFactor),
       material_emission_factor_unit: r.materialEmissionFactorUnit,
       mineral_type: r.mineralType,
-      mineral_amount: String(r.mineralAmount ?? ''),
+      mineral_amount: toSafeQtyString(r.mineralAmount),
       mineral_amount_unit: r.mineralAmountUnit,
       mineral_origin: r.mineralOrigin,
-      mineral_emission_factor: String(r.mineralEmissionFactor ?? ''),
+      mineral_emission_factor: toSafeQtyString(r.mineralEmissionFactor),
       mineral_emission_factor_unit: r.mineralEmissionFactorUnit,
     })),
     energy_rows: editableEnergyInfo.map((r) => ({
       detail_product_name: r.detailProductName,
       process_name: r.processName,
       energy_type: r.energyType,
-      energy_usage: String(r.energyUsage ?? ''),
+      energy_usage: toSafeQtyString(r.energyUsage),
       energy_unit: r.energyUnit,
-      energy_emission_factor: String(r.emissionFactor ?? ''),
+      energy_emission_factor: toSafeQtyString(r.emissionFactor),
       energy_emission_factor_unit: r.emissionFactorUnit,
     })),
     production_rows: editableProductionRows.map((r) => ({
       detail_product_name: r.detailProductName ?? company.productType,
       site_name: r.siteName,
-      production_qty: String(r.productionAmount ?? ''),
+      production_qty: toSafeQtyString(r.productionAmount),
       production_qty_unit: PRODUCTION_QTY_UNIT,
-      defective_qty: String(r.defectiveAmount ?? ''),
-      waste_qty: String(r.wasteAmount ?? ''),
+      product_unit_capacity_kg: toSafeQtyString(r.productUnitCapacityKg),
+      // 하위호환 수신용(백엔드가 둘 다 수용)
+      productUnitCapacityKg: toSafeQtyString(r.productUnitCapacityKg),
+      defective_qty: toSafeQtyString(r.defectiveAmount),
+      waste_qty: toSafeQtyString(r.wasteAmount),
       waste_qty_unit: r.wasteAmountUnit,
-      waste_emission_factor: String(r.wasteEmissionFactor ?? ''),
+      waste_emission_factor: toSafeQtyString(r.wasteEmissionFactor),
       waste_emission_factor_unit: r.wasteEmissionFactorUnit,
     })),
     transport_rows: editableTransportRows.map((r) => ({
@@ -2004,55 +2049,73 @@ export default function Tier0Detail() {
       destination_address_detail: r.destinationAddressDetail,
       transport_mode: r.transportMode,
       transport_fuel_type: r.transportFuelType ?? '',
-      transport_fuel_qty: String(r.transportFuelQty ?? ''),
+      transport_fuel_qty: toSafeQtyString(r.transportFuelQty),
       transport_fuel_qty_unit: r.transportFuelQtyUnit ?? '',
-      transport_qty: String(r.transportQty ?? ''),
+      transport_qty: toSafeQtyString(r.transportQty),
       transport_qty_unit: r.transportQtyUnit,
-      transport_emission_factor: String(r.transportEmissionFactor ?? ''),
+      transport_emission_factor: toSafeQtyString(r.transportEmissionFactor),
       transport_emission_factor_unit: r.transportEmissionFactorUnit,
     })),
   });
 
   const handleSave = async () => {
-    if (tier0CardParsed) {
-      if (mode !== 'pcf') {
-        toast.info('구매 직무에서는 저장할 수 없습니다. PCF 관점으로 전환하세요.');
-        return;
-      }
+    const rawKey = typeof companyKey === 'string' ? companyKey : String(companyKey ?? '');
+    const decodedKey = (() => {
       try {
-        const ymParts = tier0CardParsed.yearMonth.split('-');
-        const reportingYear = parseInt(ymParts[0] ?? '', 10);
-        const reportingMonth = parseInt(ymParts[1] ?? '', 10);
-        if (!reportingYear || !reportingMonth) {
-          toast.error('조회 월(YYYY-MM)을 확인할 수 없습니다.');
-          return;
-        }
-        if (typeof window !== 'undefined' && !getOprAccessToken()) {
-          await restoreOprSessionFromCookie();
-        }
-        const res = await putOprTier0FactoryData({
-          custBranchId: tier0CardParsed.custBranchId,
-          productVariantId: tier0CardParsed.productVariantId,
-          reportingYear,
-          reportingMonth,
-          team: 'pcf',
-          body: buildTier0FactorySaveBody(),
-        });
-        if (res.warnings?.length) {
-          toast.message(res.warnings.join('\n'), { duration: 8000 });
-        }
-        toast.success(res.message ?? '저장되었습니다.');
-      } catch (e) {
-        toast.error(e instanceof Error ? e.message : '저장에 실패했습니다.');
+        return decodeURIComponent(rawKey);
+      } catch {
+        return rawKey;
       }
+    })();
+    const parsedFromKey = parseDataViewTier0CardKey(decodedKey);
+    const parsed = parsedFromKey ?? tier0CardParsed;
+    if (!parsed) {
+      toast.error(`저장 대상 식별 실패: ${decodedKey || '(empty key)'}`);
       return;
     }
-    toast.success('저장되었습니다');
+    try {
+      // 편집 중 셀이 있으면 먼저 편집 상태를 닫아 최신 입력값 반영을 보장
+      setSiteManagerEditCell(null);
+      setMaterialEditCell(null);
+      setEnergyEditCell(null);
+      setProductionEditCell(null);
+      setTransportEditCell(null);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const ymParts = parsed.yearMonth.split('-');
+      const reportingYear = parseInt(ymParts[0] ?? '', 10);
+      const reportingMonth = parseInt(ymParts[1] ?? '', 10);
+      if (!reportingYear || !reportingMonth) {
+        toast.error(`조회 월(YYYY-MM) 파싱 실패: ${parsed.yearMonth}`);
+        return;
+      }
+      if (typeof window !== 'undefined' && !getOprAccessToken()) {
+        await restoreOprSessionFromCookie();
+      }
+      const res = await putOprTier0FactoryData({
+        custBranchId: parsed.custBranchId,
+        productVariantId: parsed.productVariantId,
+        reportingYear,
+        reportingMonth,
+        team: 'pcf',
+        body: buildTier0FactorySaveBody(),
+      });
+      if (res.warnings?.length) {
+        toast.message(res.warnings.join('\n'), { duration: 8000 });
+      }
+      if (!res.saved) {
+        toast.error(res.message ?? '저장 실패');
+        return;
+      }
+      toast.success(res.message ?? '저장되었습니다.');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : '저장에 실패했습니다.');
+    }
   };
 
   const handleTier0ExcelUploadConfirm = async () => {
     const input = tier0ExcelFileInputRef.current;
-    const file = input?.files?.[0];
+    const file = tier0SelectedExcelFile ?? input?.files?.[0];
     if (!file) {
       toast.error('Excel 파일을 선택하세요.');
       return;
@@ -2069,6 +2132,7 @@ export default function Tier0Detail() {
       applyTier0ImportPreview(preview);
       toast.success('엑셀 내용을 화면에 반영했습니다. 확인 후 수정 완료를 누르면 DB에 저장됩니다.');
       setShowUploadModal(false);
+      setTier0SelectedExcelFile(null);
       if (input) input.value = '';
     } catch (e) {
       toast.error(e instanceof Error ? e.message : '엑셀 미리보기에 실패했습니다.');
@@ -2076,6 +2140,43 @@ export default function Tier0Detail() {
       setTier0ImportBusy(false);
     }
   };
+
+  const handleTier0ExcelFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setTier0SelectedExcelFile(e.target.files?.[0] ?? null);
+  };
+
+  const handleTier0ExcelDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'copy';
+  };
+
+  const handleTier0ExcelDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setTier0Dragging(false);
+    const file = e.dataTransfer.files?.[0] ?? null;
+    if (!file) return;
+    const lower = file.name.toLowerCase();
+    if (!lower.endsWith('.xlsx') && !lower.endsWith('.xlsm')) {
+      toast.error('xlsx 또는 xlsm 파일만 업로드할 수 있습니다.');
+      return;
+    }
+    setTier0SelectedExcelFile(file);
+  };
+
+  useEffect(() => {
+    if (!showUploadModal) return;
+    const blockBrowserDrop = (e: DragEvent) => {
+      e.preventDefault();
+    };
+    window.addEventListener('dragover', blockBrowserDrop);
+    window.addEventListener('drop', blockBrowserDrop);
+    return () => {
+      window.removeEventListener('dragover', blockBrowserDrop);
+      window.removeEventListener('drop', blockBrowserDrop);
+    };
+  }, [showUploadModal]);
 
   const handleInsertProductionRowAfter = (rowIndex: number) => {
     setEditableProductionRows((prev) => {
@@ -2203,7 +2304,8 @@ export default function Tier0Detail() {
           value={String(value ?? '')}
           onChange={(e) => {
             const raw = e.target.value;
-            const nextValue = typeof value === 'number' ? Number(raw || 0) : raw;
+            const nextValue =
+              typeof value === 'number' ? (parseLooseNumber(raw) ?? 0) : raw;
             setEditableProductionRows((prev) =>
               prev.map((r, i) => (i === rowIndex ? { ...r, [field]: nextValue } : r)),
             );
@@ -2256,7 +2358,8 @@ export default function Tier0Detail() {
           value={String(value ?? '')}
           onChange={(e) => {
             const raw = e.target.value;
-            const nextValue = typeof value === 'number' ? Number(raw || 0) : raw;
+            const nextValue =
+              typeof value === 'number' ? (parseLooseNumber(raw) ?? 0) : raw;
             setEditableTransportRows((prev) =>
               prev.map((r, i) => (i === rowIndex ? { ...r, [field]: nextValue } : r)),
             );
@@ -3285,6 +3388,7 @@ export default function Tier0Detail() {
                       <th className={SUP_DETAIL_TH}>사업장명</th>
                       <th className={SUP_DETAIL_TH}>생산량</th>
                       <th className={SUP_DETAIL_TH}>생산량 단위</th>
+                      <th className={SUP_DETAIL_TH}>제품단위 실측 중량 (kg per unit)</th>
                       <th className={SUP_DETAIL_TH}>불량품 수량</th>
                       <th className={SUP_DETAIL_TH}>폐기물량</th>
                       <th className={SUP_DETAIL_TH}>폐기물량 단위</th>
@@ -3325,6 +3429,29 @@ export default function Tier0Detail() {
                             <div className={cellShellClass} style={{ color: 'var(--aifix-navy)' }}>
                               <span className="min-w-0 flex-1 truncate text-gray-700">{PRODUCTION_QTY_UNIT}</span>
                             </div>
+                          </td>
+                          <td className={SUP_DETAIL_TD}>
+                            {isTabEditable(7) ? (
+                              <div className={`${cellShellClass} outline-none`}>
+                                <input
+                                  value={String(row.productUnitCapacityKg ?? '')}
+                                  onChange={(e) => {
+                                    // 입력 중 값 유실 방지를 위해 원문 문자열로 상태 유지하고,
+                                    // 저장 시 toSafeQtyString에서 숫자 정규화한다.
+                                    const nextValue = e.target.value;
+                                    setEditableProductionRows((prev) =>
+                                      prev.map((r, i) =>
+                                        i === idx ? { ...r, productUnitCapacityKg: nextValue } : r,
+                                      ),
+                                    );
+                                  }}
+                                  className="m-0 h-full min-h-0 w-full min-w-0 flex-1 appearance-none border-0 bg-transparent p-0 text-sm text-[var(--aifix-navy)] outline-none"
+                                  placeholder="예: 200"
+                                />
+                              </div>
+                            ) : (
+                              formatProductionValue(row.productUnitCapacityKg)
+                            )}
                           </td>
                           <td className={SUP_DETAIL_TD}>
                             {renderProductionValueContent(idx, 'defectiveAmount', row.defectiveAmount)}
@@ -4052,7 +4179,7 @@ export default function Tier0Detail() {
               <h2 className="text-xl font-bold text-gray-900">공정 실적 Excel 업로드</h2>
               <p className="mt-2 text-sm text-gray-500">
                 사업장 정보·담당자 정보·설비 정보 시트는 업로드해도 읽지 않으며, 해당 탭 화면은 바뀌지
-                않습니다. 사업장 담당자·자재·에너지·생산 시트만 읽어 화면에 반영합니다. DB 반영은 확인 후
+                않습니다. 사업장 담당자·자재·에너지·생산·운송 시트만 읽어 화면에 반영합니다. DB 반영은 확인 후
                 「수정 완료」를 누르세요.
               </p>
             </div>
@@ -4061,18 +4188,43 @@ export default function Tier0Detail() {
                 ref={tier0ExcelFileInputRef}
                 type="file"
                 accept=".xlsx,.xlsm,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                onChange={handleTier0ExcelFileInputChange}
                 className="sr-only"
                 aria-hidden
               />
-              <button
-                type="button"
+              <div
+                role="button"
+                tabIndex={0}
                 onClick={() => tier0ExcelFileInputRef.current?.click()}
-                className="w-full border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-[#5B3BFA] transition-colors cursor-pointer"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    tier0ExcelFileInputRef.current?.click();
+                  }
+                }}
+                onDragEnter={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setTier0Dragging(true);
+                }}
+                onDragLeave={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setTier0Dragging(false);
+                }}
+                onDragOver={handleTier0ExcelDragOver}
+                onDrop={handleTier0ExcelDrop}
+                className={`w-full border-2 border-dashed rounded-lg p-8 text-center transition-colors cursor-pointer ${
+                  tier0Dragging ? 'border-[#5B3BFA] bg-[#F7F5FF]' : 'border-gray-300 hover:border-[#5B3BFA]'
+                }`}
               >
                 <Upload className="w-12 h-12 mx-auto mb-4 text-gray-400" />
                 <p className="text-gray-700 font-medium mb-2">파일을 드래그하거나 클릭하여 선택</p>
                 <p className="text-sm text-gray-500">xlsx 파일 (다운로드한 tier0/export와 동일 구조)</p>
-              </button>
+                {tier0SelectedExcelFile ? (
+                  <p className="mt-2 text-xs text-[#5B3BFA]">{tier0SelectedExcelFile.name}</p>
+                ) : null}
+              </div>
               <div className="mt-6 space-y-3">
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input
@@ -4101,6 +4253,7 @@ export default function Tier0Detail() {
                 type="button"
                 onClick={() => {
                   setShowUploadModal(false);
+                  setTier0SelectedExcelFile(null);
                   if (tier0ExcelFileInputRef.current) tier0ExcelFileInputRef.current.value = '';
                 }}
                 className="px-5 py-2.5 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
@@ -4116,7 +4269,7 @@ export default function Tier0Detail() {
                   background: 'linear-gradient(90deg, #5B3BFA 0%, #00B4FF 100%)',
                 }}
               >
-                {tier0ImportBusy ? '처리 중…' : '미리보기 반영'}
+                {tier0ImportBusy ? '처리 중…' : '등록'}
               </button>
             </div>
           </div>
