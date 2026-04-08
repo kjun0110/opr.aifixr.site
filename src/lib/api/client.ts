@@ -76,7 +76,7 @@ async function postOprRefresh(): Promise<boolean> {
       }
       setOprAccessToken(data.accessToken);
       if (typeof window !== "undefined") {
-        const dept = data.user.department?.trim();
+        const dept = data.user?.department?.trim();
         if (dept) {
           localStorage.setItem(OPR_DEPARTMENT_STORAGE_KEY, dept);
         } else {
