@@ -7,7 +7,7 @@ import { useRouter } from 'next/navigation';
 import * as XLSX from 'xlsx';
 import MonthPicker from './MonthPicker';
 import { useMode } from '../context/ModeContext';
-import { actorStorageKey, apiFetch, restoreOprSessionFromCookie } from '@/lib/api/client';
+import { apiFetch, restoreOprSessionFromCookie } from '@/lib/api/client';
 import { getOprAccessToken } from '@/lib/api/sessionAccessToken';
 import {
   getOprBomPeriod,
@@ -33,6 +33,108 @@ type ScaffoldVariantRow = {
   variantName: string;
   variantCode: string | null;
 };
+
+let pcfScaffoldCache: ScaffoldVariantRow[] | null = null;
+let pcfScaffoldInFlight: Promise<ScaffoldVariantRow[]> | null = null;
+
+async function loadPcfScaffoldRows(): Promise<ScaffoldVariantRow[]> {
+  if (pcfScaffoldCache) return pcfScaffoldCache;
+  if (pcfScaffoldInFlight) return pcfScaffoldInFlight;
+
+  pcfScaffoldInFlight = (async () => {
+    if (typeof window !== 'undefined' && !getOprAccessToken()) {
+      await restoreOprSessionFromCookie();
+    }
+    const customers = await apiFetch<{ id: number; name: string }[]>(
+      '/api/supply-chain/project-supply-chain/customers',
+    );
+    const allBranchesNested = await Promise.all(
+      customers.map(async (customer) => {
+        try {
+          const branches = await apiFetch<{ id: number; name?: string }[]>(
+            `/api/supply-chain/project-supply-chain/customers/${customer.id}/branches`,
+          );
+          return branches.map((b) => ({ customer, branch: b }));
+        } catch {
+          return [];
+        }
+      }),
+    );
+    const allBranches = allBranchesNested.flat();
+
+    const allProjectsResults = await Promise.all(
+      allBranches.map(async ({ customer, branch }) => {
+        try {
+          const project = await apiFetch<{
+            id: number;
+            start_date: string;
+            end_date: string;
+          }>(`/api/supply-chain/project-supply-chain/branches/${branch.id}/project`);
+          return { customer, branch, project };
+        } catch {
+          return null;
+        }
+      }),
+    );
+    const allProjects = allProjectsResults.filter(
+      (x): x is NonNullable<typeof x> => x !== null,
+    );
+
+    const allProductsNested = await Promise.all(
+      allProjects.map(async ({ customer, branch, project }) => {
+        try {
+          const products = await apiFetch<{ id: number; name: string }[]>(
+            `/api/supply-chain/project-supply-chain/projects/${project.id}/products`,
+          );
+          return products.map((prod) => ({ customer, branch, project, product: prod }));
+        } catch {
+          return [];
+        }
+      }),
+    );
+    const allProductsFlat = allProductsNested.flat();
+
+    const allVariantsNested = await Promise.all(
+      allProductsFlat.map(async (item) => {
+        try {
+          const variants = await apiFetch<
+            { id: number; name: string; code?: string | null }[]
+          >(
+            `/api/supply-chain/project-supply-chain/projects/${item.project.id}/products/${item.product.id}/product-variants`,
+          );
+          return variants.map((v) => ({ ...item, variant: v }));
+        } catch {
+          return [];
+        }
+      }),
+    );
+    const allVariants = allVariantsNested.flat();
+
+    const rows: ScaffoldVariantRow[] = allVariants.map((item) => ({
+      customerId: item.customer.id,
+      customerName: item.customer.name || `고객 #${item.customer.id}`,
+      branchId: item.branch.id,
+      branchName: item.branch.name ?? `지사 #${item.branch.id}`,
+      projectId: item.project.id,
+      projectStartIso: item.project.start_date,
+      projectEndIso: item.project.end_date,
+      productId: item.product.id,
+      productName: item.product.name,
+      variantId: item.variant.id,
+      variantName: item.variant.name,
+      variantCode: item.variant.code ?? null,
+    }));
+
+    pcfScaffoldCache = rows;
+    return rows;
+  })();
+
+  try {
+    return await pcfScaffoldInFlight;
+  } finally {
+    pcfScaffoldInFlight = null;
+  }
+}
 
 /** 이름과 코드가 같으면 한 번만 표시 (예: prodA_var1 | prodA_var1 방지) */
 function formatVariantLabel(name: string, code: string | null | undefined): string {
@@ -84,46 +186,6 @@ function pickDefaultPeriodMonth(enabled: string[]): string | null {
   const notAfterPrev = sorted.filter((m) => m <= prev);
   if (notAfterPrev.length > 0) return notAfterPrev[notAfterPrev.length - 1];
   return sorted[0];
-}
-
-/** 세부제품×조회월별 PCF 실행 단계(브라우저 저장 — 추후 서버 산정 이력 API로 대체 가능) */
-const PCF_MONTH_RUN_KEY = 'aifix_pcf_month_run_state_v1';
-
-function pcfMonthRunKey(variantId: number, ym: string): string {
-  return `${variantId}|${ym}`;
-}
-
-function readMonthRunState(variantId: number, ym: string): { partial: boolean; final: boolean } {
-  if (typeof window === 'undefined') return { partial: false, final: false };
-  try {
-    const raw = localStorage.getItem(PCF_MONTH_RUN_KEY);
-    const o = raw
-      ? (JSON.parse(raw) as Record<string, { partial?: boolean; final?: boolean }>)
-      : {};
-    const r = o[pcfMonthRunKey(variantId, ym)];
-    return { partial: !!r?.partial, final: !!r?.final };
-  } catch {
-    return { partial: false, final: false };
-  }
-}
-
-function writeMonthRunState(
-  variantId: number,
-  ym: string,
-  patch: Partial<{ partial: boolean; final: boolean }>,
-): void {
-  if (typeof window === 'undefined') return;
-  try {
-    const raw = localStorage.getItem(PCF_MONTH_RUN_KEY);
-    const o = raw
-      ? (JSON.parse(raw) as Record<string, { partial?: boolean; final?: boolean }>)
-      : {};
-    const k = pcfMonthRunKey(variantId, ym);
-    o[k] = { ...o[k], ...patch };
-    localStorage.setItem(PCF_MONTH_RUN_KEY, JSON.stringify(o));
-  } catch {
-    /* ignore */
-  }
 }
 
 function monthsFromProjectIso(startIso: string, endIso: string): string[] {
@@ -441,7 +503,7 @@ interface CalculationHistory {
 export default function PcfCalculation() {
   const router = useRouter();
   const { mode } = useMode();
-
+  
   // 세부탭 상태
   const [activeTab, setActiveTab] = useState<'calculation' | 'history'>('calculation');
 
@@ -464,96 +526,11 @@ export default function PcfCalculation() {
 
   useEffect(() => {
     let mounted = true;
-    let loadAttempted = false;
 
     const loadScaffold = async () => {
-      if (loadAttempted) return;
-      loadAttempted = true;
       setScaffoldLoading(true);
       try {
-        if (typeof window !== 'undefined' && !getOprAccessToken()) {
-          await restoreOprSessionFromCookie();
-        }
-        const customers = await apiFetch<{ id: number; name: string }[]>(
-          '/api/supply-chain/project-supply-chain/customers',
-        );
-        const allBranchesNested = await Promise.all(
-          customers.map(async (customer) => {
-            try {
-              const branches = await apiFetch<{ id: number; name?: string }[]>(
-                `/api/supply-chain/project-supply-chain/customers/${customer.id}/branches`,
-              );
-              return branches.map((b) => ({ customer, branch: b }));
-            } catch {
-              return [];
-            }
-          }),
-        );
-        const allBranches = allBranchesNested.flat();
-
-        const allProjectsResults = await Promise.all(
-          allBranches.map(async ({ customer, branch }) => {
-            try {
-              const project = await apiFetch<{
-                id: number;
-                start_date: string;
-                end_date: string;
-              }>(`/api/supply-chain/project-supply-chain/branches/${branch.id}/project`);
-              return { customer, branch, project };
-            } catch {
-              return null;
-            }
-          }),
-        );
-        const allProjects = allProjectsResults.filter(
-          (x): x is NonNullable<typeof x> => x !== null,
-        );
-
-        const allProductsNested = await Promise.all(
-          allProjects.map(async ({ customer, branch, project }) => {
-            try {
-              const products = await apiFetch<{ id: number; name: string }[]>(
-                `/api/supply-chain/project-supply-chain/projects/${project.id}/products`,
-              );
-              return products.map((prod) => ({ customer, branch, project, product: prod }));
-            } catch {
-              return [];
-            }
-          }),
-        );
-        const allProductsFlat = allProductsNested.flat();
-
-        const allVariantsNested = await Promise.all(
-          allProductsFlat.map(async (item) => {
-            try {
-              const variants = await apiFetch<
-                { id: number; name: string; code?: string | null }[]
-              >(
-                `/api/supply-chain/project-supply-chain/projects/${item.project.id}/products/${item.product.id}/product-variants`,
-              );
-              return variants.map((v) => ({ ...item, variant: v }));
-            } catch {
-              return [];
-            }
-          }),
-        );
-        const allVariants = allVariantsNested.flat();
-
-        const rows: ScaffoldVariantRow[] = allVariants.map((item) => ({
-          customerId: item.customer.id,
-          customerName: item.customer.name || `고객 #${item.customer.id}`,
-          branchId: item.branch.id,
-          branchName: item.branch.name ?? `지사 #${item.branch.id}`,
-          projectId: item.project.id,
-          projectStartIso: item.project.start_date,
-          projectEndIso: item.project.end_date,
-          productId: item.product.id,
-          productName: item.product.name,
-          variantId: item.variant.id,
-          variantName: item.variant.name,
-          variantCode: item.variant.code ?? null,
-        }));
-
+        const rows = await loadPcfScaffoldRows();
         if (mounted) setScaffoldVariants(rows);
       } catch (e) {
         console.error('PcfCalculation scaffold load failed', e);
@@ -735,15 +712,53 @@ export default function PcfCalculation() {
     selectedMonth != null &&
     projectPeriodMonths.includes(selectedMonth);
 
-  useEffect(() => {
-    if (!selectedDetailProduct || !selectedMonth) {
+  const refreshMonthRunState = useCallback(async () => {
+    if (!selectedDetailProduct || !selectedMonth || !selectedProduct || !selectedDetailMeta?.projectId) {
       setMonthRunState({ partial: false, final: false });
       return;
     }
     const vid = Number(selectedDetailProduct);
-    if (!Number.isFinite(vid)) return;
-    setMonthRunState(readMonthRunState(vid, selectedMonth));
-  }, [selectedDetailProduct, selectedMonth]);
+    const pid = Number(selectedProduct);
+    const projectId = Number(selectedDetailMeta.projectId);
+    const [yRaw, mRaw] = selectedMonth.split('-');
+    const ry = Number(yRaw);
+    const rm = Number(mRaw);
+    if (
+      !Number.isFinite(vid) ||
+      !Number.isFinite(pid) ||
+      !Number.isFinite(projectId) ||
+      !Number.isFinite(ry) ||
+      !Number.isFinite(rm)
+    ) {
+      setMonthRunState({ partial: false, final: false });
+      return;
+    }
+    try {
+      const rows = await getOprPcfRuns({
+        project_id: projectId,
+        product_id: pid,
+        product_variant_id: vid,
+        reporting_year: ry,
+        reporting_month: rm,
+        limit: 100,
+        offset: 0,
+      });
+      const isDone = (s?: string) => {
+        const v = (s || '').toLowerCase();
+        return v === 'completed' || v === 'success';
+      };
+      // 원청 기준: node_rollup=부분, batch=최종
+      const partial = rows.some((r) => isDone(r.status) && (r.run_kind || '').toLowerCase() === 'node_rollup');
+      const final = rows.some((r) => isDone(r.status) && (r.run_kind || '').toLowerCase() === 'batch');
+      setMonthRunState({ partial, final });
+    } catch {
+      setMonthRunState({ partial: false, final: false });
+    }
+  }, [selectedDetailMeta?.projectId, selectedDetailProduct, selectedMonth, selectedProduct]);
+
+  useEffect(() => {
+    void refreshMonthRunState();
+  }, [refreshMonthRunState]);
 
   useEffect(() => {
     if (!isTargetSelectionComplete || !selectedBranch || !selectedDetailProduct || !selectedMonth) {
@@ -833,14 +848,8 @@ export default function PcfCalculation() {
         if (typeof window !== 'undefined' && !getOprAccessToken()) {
           await restoreOprSessionFromCookie();
         }
-        const actorRaw = typeof window !== 'undefined'
-          ? localStorage.getItem(actorStorageKey())
-          : null;
-        const actorId = Number(actorRaw);
         const resp = await getOprDataViewContacts();
-        const selfRow =
-          resp.rows.find((r) => r.is_self) ??
-          (Number.isFinite(actorId) ? resp.rows.find((r) => r.user_id === actorId) : undefined);
+        const selfRow = resp.rows.find((r) => r.is_self);
         const nm = (selfRow?.name || '').trim();
         if (!cancelled && nm) setExecutorFallbackName(nm);
       } catch {
@@ -975,8 +984,7 @@ export default function PcfCalculation() {
         reporting_month: rm,
         calculation_mode: 'partial',
       });
-      writeMonthRunState(vid, selectedMonth, { partial: true });
-      setMonthRunState(readMonthRunState(vid, selectedMonth));
+      await refreshMonthRunState();
       setCurrentResult('partial');
       setShowResult(true);
       const now = new Date();
@@ -1020,8 +1028,7 @@ export default function PcfCalculation() {
         reporting_month: rm,
         calculation_mode: 'final',
       });
-      writeMonthRunState(vid, selectedMonth, { partial: true, final: true });
-      setMonthRunState(readMonthRunState(vid, selectedMonth));
+      await refreshMonthRunState();
       setCurrentResult('final');
       setShowResult(true);
       const now = new Date();
@@ -1083,17 +1090,14 @@ export default function PcfCalculation() {
         toast.info('현재 월 기준 미입력 협력사가 없습니다.');
         return;
       }
-      const actorIdRaw = typeof window !== 'undefined' ? localStorage.getItem(actorStorageKey()) : null;
-      const actorId = Number(actorIdRaw);
       await postOprDataRequest({
         project_id: projectId,
         product_id: pid,
         product_variant_id: vid,
         reporting_year: ry,
         reporting_month: rm,
-        requested_by_user_id: Number.isFinite(actorId) ? actorId : undefined,
         request_mode: 'chain',
-        message: '데이터를 입력하고 PCF 최종산정을 준비해주세요',
+        message: '데이터를 입력하고 PCF 최종산정 후 제출하세요',
         target_supply_chain_node_ids: targetNodeIds,
       });
       toast.success(`미입력 협력사 ${targetNodeIds.length}곳에 요청 알림을 발송했습니다.`);
@@ -1440,8 +1444,8 @@ export default function PcfCalculation() {
           style={{ paddingLeft: `${depth * 24 + 16}px` }}
         >
           <div className="col-span-4 flex items-center gap-2">
-            {hasChildren && (
-              <button
+          {hasChildren && (
+            <button
                 onClick={(e) => {
                   e.stopPropagation();
                   toggleRow(company.id);
@@ -1453,8 +1457,8 @@ export default function PcfCalculation() {
                 ) : (
                   <ChevronRight className="w-4 h-4" />
                 )}
-              </button>
-            )}
+            </button>
+          )}
             {!hasChildren && <div className="w-5"></div>}
             <span>{company.companyName}</span>
           </div>
@@ -1470,7 +1474,7 @@ export default function PcfCalculation() {
               <span className="px-2 py-1 bg-green-100 text-green-700 rounded text-xs flex items-center gap-1">
                 <CheckCircle className="w-3 h-3" />
                 최종완료
-              </span>
+          </span>
             )}
             {company.status === 'missing' && (
               <span className="px-2 py-1 bg-red-100 text-red-700 rounded text-xs">미제출</span>
@@ -1527,129 +1531,129 @@ export default function PcfCalculation() {
       {activeTab === 'calculation' && (
         <>
           {/* A. PCF 산정 대상 선택 */}
-          <div
-            className="bg-white p-8"
-            style={{
-              borderRadius: '20px',
-              boxShadow: '0px 4px 16px rgba(0,0,0,0.05)',
-            }}
-          >
-            <h2 className="text-xl font-semibold mb-6">PCF 산정 대상 선택</h2>
+      <div
+        className="bg-white p-8"
+        style={{
+          borderRadius: '20px',
+          boxShadow: '0px 4px 16px rgba(0,0,0,0.05)',
+        }}
+      >
+        <h2 className="text-xl font-semibold mb-6">PCF 산정 대상 선택</h2>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
-              <div>
+          <div>
                 <label className="block text-sm font-medium mb-2">
                   고객사 <span style={{ color: '#EF4444' }}>*</span>
                 </label>
-                <select
-                  value={selectedCustomer}
+            <select
+              value={selectedCustomer}
                   disabled={scaffoldLoading}
-                  onChange={(e) => {
-                    setSelectedCustomer(e.target.value);
-                    setSelectedBranch('');
-                    setSelectedProduct('');
-                    setSelectedDetailProduct('');
-                    setSelectedMonth(null);
-                  }}
+              onChange={(e) => {
+                setSelectedCustomer(e.target.value);
+                setSelectedBranch('');
+                setSelectedProduct('');
+                setSelectedDetailProduct('');
+                setSelectedMonth(null);
+              }}
                   className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5B3BFA] disabled:bg-gray-100"
-                >
+            >
                   <option value="">
                     {scaffoldLoading ? '목록 불러오는 중…' : '고객사를 선택하세요'}
                   </option>
-                  {customerOptions.map((c) => (
+              {customerOptions.map((c) => (
                     <option key={c.id} value={String(c.id)}>
                       {c.name}
                     </option>
-                  ))}
-                </select>
-              </div>
+              ))}
+            </select>
+          </div>
 
-              <div>
+          <div>
                 <label className="block text-sm font-medium mb-2">세부지사</label>
-                <select
-                  value={selectedBranch}
+            <select
+              value={selectedBranch}
                   disabled={!selectedCustomer || scaffoldLoading}
-                  onChange={(e) => {
-                    setSelectedBranch(e.target.value);
-                    setSelectedProduct('');
-                    setSelectedDetailProduct('');
-                    setSelectedMonth(null);
-                  }}
-                  className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5B3BFA] disabled:bg-gray-100"
-                >
+              onChange={(e) => {
+                setSelectedBranch(e.target.value);
+                setSelectedProduct('');
+                setSelectedDetailProduct('');
+                setSelectedMonth(null);
+              }}
+              className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5B3BFA] disabled:bg-gray-100"
+            >
                   <option value="">세부지사를 선택하세요</option>
-                  {branchOptions.map((b) => (
+              {branchOptions.map((b) => (
                     <option key={b.id} value={String(b.id)}>
                       {b.name}
                     </option>
-                  ))}
-                </select>
-              </div>
+              ))}
+            </select>
+          </div>
 
-              <div>
-                <label className="block text-sm font-medium mb-2">제품</label>
-                <select
-                  value={selectedProduct}
+          <div>
+            <label className="block text-sm font-medium mb-2">제품</label>
+            <select
+              value={selectedProduct}
                   disabled={!selectedCustomer || scaffoldLoading}
-                  onChange={(e) => {
-                    setSelectedProduct(e.target.value);
-                    setSelectedDetailProduct('');
-                    setSelectedMonth(null);
-                  }}
-                  className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5B3BFA] disabled:bg-gray-100"
-                >
+              onChange={(e) => {
+                setSelectedProduct(e.target.value);
+                setSelectedDetailProduct('');
+                setSelectedMonth(null);
+              }}
+              className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5B3BFA] disabled:bg-gray-100"
+            >
                   <option value="">제품을 선택하세요</option>
-                  {productOptions.map((p) => (
+              {productOptions.map((p) => (
                     <option key={p.id} value={String(p.id)}>
                       {p.name}
                     </option>
-                  ))}
-                </select>
-              </div>
+              ))}
+            </select>
+          </div>
 
-              <div>
-                <label className="block text-sm font-medium mb-2">세부제품</label>
-                <select
-                  value={selectedDetailProduct}
+          <div>
+            <label className="block text-sm font-medium mb-2">세부제품</label>
+            <select
+              value={selectedDetailProduct}
                   disabled={!selectedProduct || scaffoldLoading}
-                  onChange={(e) => {
-                    setSelectedDetailProduct(e.target.value);
-                  }}
-                  className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5B3BFA] disabled:bg-gray-100"
-                >
+              onChange={(e) => {
+                setSelectedDetailProduct(e.target.value);
+              }}
+              className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5B3BFA] disabled:bg-gray-100"
+            >
                   <option value="">세부제품을 선택하세요</option>
-                  {detailProductOptions.map((d) => (
+              {detailProductOptions.map((d) => (
                     <option key={d.variantId} value={String(d.variantId)}>
                       {formatVariantLabel(d.variantName, d.variantCode)}
                     </option>
-                  ))}
-                </select>
-              </div>
+              ))}
+            </select>
+          </div>
 
-              <div>
-                <label className="block text-sm font-medium mb-2">BOM Code</label>
-                <div className="w-full px-4 py-2.5 border border-gray-300 rounded-xl bg-gray-50 text-gray-700">
+          <div>
+            <label className="block text-sm font-medium mb-2">BOM Code</label>
+            <div className="w-full px-4 py-2.5 border border-gray-300 rounded-xl bg-gray-50 text-gray-700">
                   {displayBomCode || '-'}
-                </div>
-              </div>
+            </div>
+          </div>
 
-              <div>
-                <label className="block text-sm font-medium mb-2">
+          <div>
+            <label className="block text-sm font-medium mb-2">
                   기간(월) <span style={{ color: '#EF4444' }}>*</span>
-                </label>
-                <MonthPicker
-                  selectedMonth={selectedMonth}
+            </label>
+            <MonthPicker
+              selectedMonth={selectedMonth}
                   onChange={(v) => {
                     if (v === null) monthUserClearedRef.current = true;
                     else monthUserClearedRef.current = false;
                     setSelectedMonth(v);
                   }}
                   placeholder="세부제품 선택 후 선택 가능"
-                  enabledMonths={projectPeriodMonths}
-                  disabled={!selectedDetailProduct}
-                />
-              </div>
-            </div>
+              enabledMonths={projectPeriodMonths}
+              disabled={!selectedDetailProduct}
+            />
+          </div>
+        </div>
 
             {/* 선택 요약 */}
             {selectedCustomer && selectedMonth && (
@@ -1660,28 +1664,28 @@ export default function PcfCalculation() {
                 </div>
               </div>
             )}
-          </div>
+      </div>
 
           {/* B. PCF 산정 준비 상태 */}
-          <div
-            className="bg-gradient-to-r from-blue-50 to-cyan-50 p-6 border border-blue-200"
-            style={{
-              borderRadius: '16px',
-            }}
-          >
-            <div className="flex items-center gap-2 mb-4">
-              <Info className="w-5 h-5 text-[#00B4FF]" />
-              <h3 className="font-bold">PCF 산정 준비 상태</h3>
-            </div>
+      <div
+        className="bg-gradient-to-r from-blue-50 to-cyan-50 p-6 border border-blue-200"
+        style={{
+          borderRadius: '16px',
+        }}
+      >
+        <div className="flex items-center gap-2 mb-4">
+          <Info className="w-5 h-5 text-[#00B4FF]" />
+          <h3 className="font-bold">PCF 산정 준비 상태</h3>
+        </div>
 
             {isTargetSelectionComplete && (
               <div className="mb-4 rounded-xl border border-gray-200 bg-white/80 px-4 py-3 text-sm text-gray-700">
                 <span className="font-semibold text-gray-800">이번 달 산정 단계</span>
                 <span className="mx-2 text-gray-400">·</span>
                 {monthRunState.final ? (
-                  <span className="font-bold text-green-700">최종 산정 완료 (로컬 기록)</span>
+                  <span className="font-bold text-green-700">최종 산정 완료</span>
                 ) : monthRunState.partial ? (
-                  <span className="font-bold text-orange-700">부분 산정 완료 · 최종 미실행 (로컬 기록)</span>
+                  <span className="font-bold text-orange-700">부분 산정 완료 · 최종 미실행</span>
                 ) : (
                   <span className="text-gray-600">산정 전</span>
                 )}
@@ -1695,61 +1699,61 @@ export default function PcfCalculation() {
             ) : (
               <>
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-                  <div className="bg-white/70 p-4 rounded-lg">
+          <div className="bg-white/70 p-4 rounded-lg">
                     <div className="text-xs text-gray-600 mb-2">자사 데이터 준비 여부</div>
-                    <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2">
                       {pcfReadinessLoading ? (
                         <span className="font-bold text-gray-400">불러오는 중…</span>
                       ) : primaryDataComplete ? (
-                        <>
-                          <CheckCircle className="w-5 h-5 text-green-600" />
+                <>
+                  <CheckCircle className="w-5 h-5 text-green-600" />
                           <span className="font-bold text-green-600">준비 완료</span>
-                        </>
-                      ) : (
-                        <>
-                          <AlertTriangle className="w-5 h-5 text-red-600" />
-                          <span className="font-bold text-red-600">미입력</span>
-                        </>
-                      )}
-                    </div>
+                </>
+              ) : (
+                <>
+                  <AlertTriangle className="w-5 h-5 text-red-600" />
+                  <span className="font-bold text-red-600">미입력</span>
+                </>
+              )}
+            </div>
                     {!pcfReadinessLoading && pcfReadiness && !primaryDataComplete && (
                       <p className="mt-2 text-xs text-gray-500">
                         데이터 관리 Tier0(자재·에너지·생산) 또는 공정활동 행이 있어야 합니다.
                       </p>
                     )}
-                  </div>
+          </div>
 
-                  <div className="bg-white/70 p-4 rounded-lg">
+          <div className="bg-white/70 p-4 rounded-lg">
                     <div className="text-xs text-gray-600 mb-2">하위 협력사 데이터 제출 현황</div>
-                    <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2">
                       {pcfReadinessLoading ? (
                         <span className="font-bold text-gray-400">불러오는 중…</span>
                       ) : allSuppliersReady ? (
-                        <>
-                          <CheckCircle className="w-5 h-5 text-green-600" />
-                          <span className="font-bold text-green-600">
+                <>
+                  <CheckCircle className="w-5 h-5 text-green-600" />
+                  <span className="font-bold text-green-600">
                             {supplierDataTotal === 0
                               ? '대상 없음'
                               : `${supplierDataComplete} / ${supplierDataTotal}`}
-                          </span>
-                        </>
-                      ) : (
-                        <>
-                          <Clock className="w-5 h-5 text-yellow-600" />
-                          <span className="font-bold text-yellow-600">
-                            {supplierDataComplete} / {supplierDataTotal}
-                          </span>
-                        </>
-                      )}
-                    </div>
+                  </span>
+                </>
+              ) : (
+                <>
+                  <Clock className="w-5 h-5 text-yellow-600" />
+                  <span className="font-bold text-yellow-600">
+                    {supplierDataComplete} / {supplierDataTotal}
+                  </span>
+                </>
+              )}
+            </div>
                     {!pcfReadinessLoading && supplierDataTotal === 0 && (
                       <p className="mt-2 text-xs text-gray-500">
                         원청 승인이 완료된 하위 협력사 노드가 없으면 제출 현황은 0/0이며, 최종 산정도 바로 가능합니다.
                       </p>
                     )}
-                  </div>
+          </div>
 
-                  <div className="bg-white/70 p-4 rounded-lg">
+          <div className="bg-white/70 p-4 rounded-lg">
                     <div className="text-xs text-gray-600 mb-2">부분산정 가능 여부</div>
                     <div className="flex items-center gap-2">
                       {canPartialCalculate ? (
@@ -1763,10 +1767,10 @@ export default function PcfCalculation() {
                           <span className="font-bold text-gray-400">불가</span>
                         </>
                       )}
-                    </div>
-                  </div>
+            </div>
+          </div>
 
-                  <div className="bg-white/70 p-4 rounded-lg">
+          <div className="bg-white/70 p-4 rounded-lg">
                     <div className="text-xs text-gray-600 mb-2">최종산정 가능 여부</div>
                     <div className="flex items-center gap-2">
                       {canFinalCalculate ? (
@@ -1780,9 +1784,9 @@ export default function PcfCalculation() {
                           <span className="font-bold text-yellow-600">대기</span>
                         </>
                       )}
-                    </div>
-                  </div>
-                </div>
+            </div>
+          </div>
+        </div>
 
                 <div className="bg-white/70 p-4 rounded-lg mb-4">
                   <div className="text-xs text-gray-600 mb-2">미입력 협력사 수</div>
@@ -1790,13 +1794,13 @@ export default function PcfCalculation() {
                     <span className="font-bold text-red-700 text-lg">
                       {pcfReadinessLoading ? '—' : `${missingSuppliers}곳`}
                     </span>
-                    <button
+            <button
                       onClick={handleRequestMissingSuppliers}
                       disabled={pcfReadinessLoading || missingSuppliers === 0 || isRequestingMissingSuppliers}
                       className="px-3 py-1.5 text-xs border border-[#00B4FF] text-[#00B4FF] rounded-lg hover:bg-blue-50 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       {isRequestingMissingSuppliers ? '요청 발송 중...' : '미입력 협력사 요청'}
-                    </button>
+            </button>
                   </div>
                 </div>
 
@@ -1807,7 +1811,7 @@ export default function PcfCalculation() {
                     <div className="mb-4 rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-900">
                       하위 협력사 데이터 제출이 모두 완료되어 <strong>전체 준비</strong> 상태입니다. 최종 PCF 산정을
                       실행할 수 있습니다.
-                    </div>
+              </div>
                   )}
               </>
             )}
@@ -1834,7 +1838,7 @@ export default function PcfCalculation() {
                   <br />
                   하위 협력사 데이터가 준비되기 전에도 중간 결과를 확인할 수 있습니다.
                 </p>
-                <button
+          <button
                   onClick={handlePartialCalculate}
                   disabled={!canPartialCalculate || isPartialCalculating}
                   className={`w-full px-4 py-3 rounded-lg font-semibold flex items-center justify-center gap-2 transition-all ${canPartialCalculate && !isPartialCalculating
@@ -1853,7 +1857,7 @@ export default function PcfCalculation() {
                       부분산정 실행
                     </>
                   )}
-                </button>
+          </button>
               </div>
 
               <div className="p-4 border-2 border-green-200 rounded-lg bg-green-50">
@@ -1866,7 +1870,7 @@ export default function PcfCalculation() {
                   <br />
                   모든 협력사 데이터가 준비되어야 실행할 수 있습니다.
                 </p>
-                <button
+            <button
                   onClick={handleFinalCalculate}
                   disabled={!canFinalCalculate}
                   className={`w-full px-4 py-3 rounded-lg font-semibold flex items-center justify-center gap-2 transition-all ${canFinalCalculate
@@ -1876,7 +1880,7 @@ export default function PcfCalculation() {
                 >
                   <Play className="w-5 h-5" />
                   최종 PCF 산정 실행
-                </button>
+            </button>
               </div>
             </div>
           </div>
@@ -1925,14 +1929,14 @@ export default function PcfCalculation() {
                   });
                 })()}
               </select>
-              <button
+            <button
                 onClick={handleLoadPartialHistory}
                 disabled={!selectedPartialHistory}
                 className="px-6 py-2.5 border border-[#00B4FF] text-[#00B4FF] rounded-lg hover:bg-blue-50 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 불러오기
-              </button>
-              <button
+            </button>
+            <button
                 onClick={() => {
                   if (!selectedPartialHistory) {
                     toast.error('부분산정 기록을 선택해주세요');
@@ -1944,27 +1948,27 @@ export default function PcfCalculation() {
                 className="px-6 py-2.5 bg-gradient-to-r from-[#00B4FF] to-[#5B3BFA] text-white rounded-lg hover:scale-105 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 이어서 최종산정
-              </button>
-            </div>
-          </div>
+            </button>
+        </div>
+      </div>
 
           {/* 계산 결과 영역 */}
           {showResult && currentResult && mockCompanyResults.length > 0 && (
             <>
               {/* A. 총 PCF 결과 카드 */}
-              <div
-                className="bg-white p-6"
-                style={{
-                  borderRadius: '16px',
-                  boxShadow: '0px 2px 8px rgba(0,0,0,0.05)',
-                }}
-              >
-                <div className="flex items-center justify-between mb-4">
+        <div
+          className="bg-white p-6"
+          style={{
+            borderRadius: '16px',
+            boxShadow: '0px 2px 8px rgba(0,0,0,0.05)',
+          }}
+        >
+          <div className="flex items-center justify-between mb-4">
                   <h3 className="font-bold text-lg">총 PCF 결과</h3>
                   {currentResult === 'partial' && (
                     <span className="px-3 py-1 bg-orange-100 text-orange-700 rounded-lg text-sm font-medium">
                       부분산정 결과 (자사 데이터만)
-                    </span>
+              </span>
                   )}
                   {currentResult === 'final' && (
                     <span className="px-3 py-1 bg-green-100 text-green-700 rounded-lg text-sm font-medium flex items-center gap-1">
@@ -1972,7 +1976,7 @@ export default function PcfCalculation() {
                       최종산정 완료
                     </span>
                   )}
-                </div>
+            </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="p-4 rounded-xl bg-cyan-50">
@@ -2019,7 +2023,7 @@ export default function PcfCalculation() {
                         }}
                       />
                     </div>
-                  </div>
+          </div>
 
                   {/* 협력사 기여 */}
                   {currentResult === 'final' && (
@@ -2070,9 +2074,9 @@ export default function PcfCalculation() {
                           </div>
                         ))}
                       </div>
-                    </div>
-                  )}
-                </div>
+            </div>
+          )}
+        </div>
               </div>
 
               {/* C. 협력사별 계산 결과 테이블 */}
@@ -2129,24 +2133,24 @@ export default function PcfCalculation() {
       {activeTab === 'history' && (
         <div
           className="bg-white overflow-x-auto"
-          style={{
-            borderRadius: '16px',
-            boxShadow: '0px 2px 8px rgba(0,0,0,0.05)',
-          }}
-        >
-          <div className="p-6 border-b border-gray-200">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
+        style={{
+          borderRadius: '16px',
+          boxShadow: '0px 2px 8px rgba(0,0,0,0.05)',
+        }}
+      >
+        <div className="p-6 border-b border-gray-200">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
                 <History className="w-5 h-5 text-[#00B4FF]" />
                 <h2 className="text-lg font-bold">PCF 계산 이력</h2>
                 <span className="text-xs text-gray-500 ml-2">※ 과거에 수행된 모든 산정 기록</span>
-              </div>
+            </div>
               {!isHistoryDownloadSelecting ? (
-                <button
+              <button
                   onClick={startHistoryDownloadSelection}
-                  className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 flex items-center gap-2"
-                >
-                  <Download className="w-4 h-4" />
+                className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 flex items-center gap-2"
+              >
+                <Download className="w-4 h-4" />
                   다운로드
                 </button>
               ) : (
@@ -2162,16 +2166,16 @@ export default function PcfCalculation() {
                     className="px-3 py-2 text-sm text-white rounded-lg bg-gradient-to-r from-[#00B4FF] to-[#5B3BFA] hover:opacity-90"
                   >
                     선택 완료 ({selectedHistoryIds.size})
-                  </button>
-                </div>
-              )}
+              </button>
             </div>
+              )}
           </div>
+        </div>
 
           <div className="min-w-[1000px]">
-            <table className="w-full">
-              <thead className="bg-[#F0F9FF] border-b border-blue-200">
-                <tr>
+          <table className="w-full">
+            <thead className="bg-[#F0F9FF] border-b border-blue-200">
+              <tr>
                   {isHistoryDownloadSelecting && (
                     <th className="px-4 py-3 text-center text-xs font-semibold">
                       <input
@@ -2190,9 +2194,9 @@ export default function PcfCalculation() {
                   <th className="px-4 py-3 text-right text-xs font-semibold">kg 기준 PCF</th>
                   <th className="px-4 py-3 text-left text-xs font-semibold">실행자</th>
                   <th className="px-4 py-3 text-left text-xs font-semibold">관리</th>
-                </tr>
-              </thead>
-              <tbody>
+              </tr>
+            </thead>
+            <tbody>
                 {histories.map((hist, idx) => (
                   <tr
                     key={hist.id}
@@ -2210,16 +2214,16 @@ export default function PcfCalculation() {
                       </td>
                     )}
                     <td className="px-4 py-3 text-sm">{hist.calculationDate}</td>
-                    <td className="px-4 py-3 text-sm">
+                  <td className="px-4 py-3 text-sm">
                       {hist.calculationType === 'partial' && (
                         <span className="px-2 py-1 bg-orange-100 text-orange-700 rounded text-xs">부분산정</span>
                       )}
                       {hist.calculationType === 'final' && (
                         <span className="px-2 py-1 bg-green-100 text-green-700 rounded text-xs">최종산정</span>
                       )}
-                    </td>
+                  </td>
                     <td className="px-4 py-3 text-xs text-gray-600">{hist.targetSummary}</td>
-                    <td className="px-4 py-3 text-sm">
+                  <td className="px-4 py-3 text-sm">
                       {hist.status === 'partial_saved' && (
                         <span className="px-2 py-1 bg-orange-100 text-orange-700 rounded text-xs">부분산정 저장</span>
                       )}
@@ -2227,38 +2231,38 @@ export default function PcfCalculation() {
                         <span className="px-2 py-1 bg-green-100 text-green-700 rounded text-xs flex items-center gap-1 w-fit">
                           <CheckCircle className="w-3 h-3" />
                           최종산정 완료
-                        </span>
+                    </span>
                       )}
                       {hist.status === 'recalculated' && (
                         <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs">재산정 완료</span>
                       )}
-                    </td>
+                  </td>
                     <td className="px-4 py-3 text-sm text-right font-semibold">
                       {hist.productPcf.toLocaleString()} kgCO₂e
                     </td>
                     <td className="px-4 py-3 text-sm text-right font-semibold">{hist.kgPcf.toFixed(4)}</td>
                     <td className="px-4 py-3 text-sm">{hist.executor}</td>
-                    <td className="px-4 py-3">
-                      <div className="flex gap-1">
-                        <button
+                  <td className="px-4 py-3">
+                    <div className="flex gap-1">
+                      <button
                           onClick={() => openHistoryDetail(hist.id)}
                           className="px-2 py-1 text-xs text-[#00B4FF] border border-[#00B4FF] rounded hover:bg-blue-50 flex items-center gap-1"
-                        >
+                      >
                           <Eye className="w-3 h-3" />
-                          상세보기
-                        </button>
+                        상세보기
+                      </button>
                         {hist.calculationType === 'partial' && (
-                          <button
+                        <button
                             onClick={() => {
                               setSelectedPartialHistory(hist.id);
                               setActiveTab('calculation');
                               toast.info('계산 탭으로 이동했습니다. 부분산정 기록을 불러와 최종산정하세요.');
                             }}
-                            className="px-2 py-1 text-xs text-gray-600 border border-gray-300 rounded hover:bg-gray-50"
-                          >
+                          className="px-2 py-1 text-xs text-gray-600 border border-gray-300 rounded hover:bg-gray-50"
+                        >
                             불러오기
-                          </button>
-                        )}
+                        </button>
+                      )}
                         <button
                           onClick={() => {
                             toast.error('정말 삭제하시겠습니까?');
@@ -2267,19 +2271,19 @@ export default function PcfCalculation() {
                         >
                           삭제
                         </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
 
           {histories.length === 0 && (
             <div className="p-12 text-center">
               <History className="w-16 h-16 mx-auto mb-4 text-gray-300" />
               <p className="text-gray-500 text-lg">산정 대상 선택 후 계산을 실행해 주세요.</p>
-            </div>
+      </div>
           )}
         </div>
       )}

@@ -86,6 +86,9 @@ type ScaffoldVariantRow = {
   variantCode: string | null;
 };
 
+let dataViewScaffoldCache: ScaffoldVariantRow[] | null = null;
+let dataViewScaffoldInFlight: Promise<ScaffoldVariantRow[]> | null = null;
+
 function parseIsoToYearMonth(iso: string): { y: number; m: number } {
   const d = new Date(iso);
   return { y: d.getFullYear(), m: d.getMonth() + 1 };
@@ -135,6 +138,107 @@ function periodEndDate(ym: string): string {
 function periodStartDate(ym: string): string {
   const [y, m] = ym.split('-').map(Number);
   return `${y}-${String(m).padStart(2, '0')}-01`;
+}
+
+async function loadDataViewScaffoldRows(): Promise<ScaffoldVariantRow[]> {
+  if (dataViewScaffoldCache) return dataViewScaffoldCache;
+  if (dataViewScaffoldInFlight) return dataViewScaffoldInFlight;
+
+  dataViewScaffoldInFlight = (async () => {
+    // OprSessionRestore 와 경쟁 시 첫 요청이 토큰 없이 나가 401 나는 것 방지
+    if (typeof window !== 'undefined' && !getOprAccessToken()) {
+      await restoreOprSessionFromCookie();
+    }
+
+    const customers = await apiFetch<{ id: number; name: string }[]>(
+      '/api/supply-chain/project-supply-chain/customers',
+    );
+    const allBranchesNested = await Promise.all(
+      customers.map(async (customer) => {
+        try {
+          const branches = await apiFetch<{ id: number; name?: string }[]>(
+            `/api/supply-chain/project-supply-chain/customers/${customer.id}/branches`,
+          );
+          return branches.map((b) => ({ customer, branch: b }));
+        } catch {
+          return [];
+        }
+      }),
+    );
+    const allBranches = allBranchesNested.flat();
+
+    const allProjectsResults = await Promise.all(
+      allBranches.map(async ({ customer, branch }) => {
+        try {
+          const project = await apiFetch<{
+            id: number;
+            start_date: string;
+            end_date: string;
+          }>(`/api/supply-chain/project-supply-chain/branches/${branch.id}/project`);
+          return { customer, branch, project };
+        } catch {
+          return null;
+        }
+      }),
+    );
+    const allProjects = allProjectsResults.filter(
+      (x): x is NonNullable<typeof x> => x !== null,
+    );
+
+    const allProductsNested = await Promise.all(
+      allProjects.map(async ({ customer, branch, project }) => {
+        try {
+          const products = await apiFetch<{ id: number; name: string }[]>(
+            `/api/supply-chain/project-supply-chain/projects/${project.id}/products`,
+          );
+          return products.map((prod) => ({ customer, branch, project, product: prod }));
+        } catch {
+          return [];
+        }
+      }),
+    );
+    const allProductsFlat = allProductsNested.flat();
+
+    const allVariantsNested = await Promise.all(
+      allProductsFlat.map(async (item) => {
+        try {
+          const variants = await apiFetch<
+            { id: number; name: string; code?: string | null }[]
+          >(
+            `/api/supply-chain/project-supply-chain/projects/${item.project.id}/products/${item.product.id}/product-variants`,
+          );
+          return variants.map((v) => ({ ...item, variant: v }));
+        } catch {
+          return [];
+        }
+      }),
+    );
+    const allVariants = allVariantsNested.flat();
+
+    const rows: ScaffoldVariantRow[] = allVariants.map((item) => ({
+      customerId: item.customer.id,
+      customerName: item.customer.name || `고객 #${item.customer.id}`,
+      branchId: item.branch.id,
+      branchName: item.branch.name ?? `지사 #${item.branch.id}`,
+      projectId: item.project.id,
+      projectStartIso: item.project.start_date,
+      projectEndIso: item.project.end_date,
+      productId: item.product.id,
+      productName: item.product.name,
+      variantId: item.variant.id,
+      variantName: item.variant.name,
+      variantCode: item.variant.code ?? null,
+    }));
+
+    dataViewScaffoldCache = rows;
+    return rows;
+  })();
+
+  try {
+    return await dataViewScaffoldInFlight;
+  } finally {
+    dataViewScaffoldInFlight = null;
+  }
 }
 
 /** 고객사 전체 조회 시: 각 지사 프로젝트 기간 ∩ 사용자 기간의 월 합집합(정렬) */
@@ -382,97 +486,11 @@ export default function DataView() {
 
   useEffect(() => {
     let mounted = true;
-    let loadAttempted = false;
 
     const loadScaffold = async () => {
-      if (loadAttempted) return;
-      loadAttempted = true;
       setScaffoldLoading(true);
       try {
-        // OprSessionRestore 와 경쟁 시 첫 요청이 토큰 없이 나가 401 나는 것 방지
-        if (typeof window !== 'undefined' && !getOprAccessToken()) {
-          await restoreOprSessionFromCookie();
-        }
-        const customers = await apiFetch<{ id: number; name: string }[]>(
-          '/api/supply-chain/project-supply-chain/customers',
-        );
-        const allBranchesNested = await Promise.all(
-          customers.map(async (customer) => {
-            try {
-              const branches = await apiFetch<{ id: number; name?: string }[]>(
-                `/api/supply-chain/project-supply-chain/customers/${customer.id}/branches`,
-              );
-              return branches.map((b) => ({ customer, branch: b }));
-            } catch {
-              return [];
-            }
-          }),
-        );
-        const allBranches = allBranchesNested.flat();
-
-        const allProjectsResults = await Promise.all(
-          allBranches.map(async ({ customer, branch }) => {
-            try {
-              const project = await apiFetch<{
-                id: number;
-                start_date: string;
-                end_date: string;
-              }>(`/api/supply-chain/project-supply-chain/branches/${branch.id}/project`);
-              return { customer, branch, project };
-            } catch {
-              return null;
-            }
-          }),
-        );
-        const allProjects = allProjectsResults.filter(
-          (x): x is NonNullable<typeof x> => x !== null,
-        );
-
-        const allProductsNested = await Promise.all(
-          allProjects.map(async ({ customer, branch, project }) => {
-            try {
-              const products = await apiFetch<{ id: number; name: string }[]>(
-                `/api/supply-chain/project-supply-chain/projects/${project.id}/products`,
-              );
-              return products.map((prod) => ({ customer, branch, project, product: prod }));
-            } catch {
-              return [];
-            }
-          }),
-        );
-        const allProductsFlat = allProductsNested.flat();
-
-        const allVariantsNested = await Promise.all(
-          allProductsFlat.map(async (item) => {
-            try {
-              const variants = await apiFetch<
-                { id: number; name: string; code?: string | null }[]
-              >(
-                `/api/supply-chain/project-supply-chain/projects/${item.project.id}/products/${item.product.id}/product-variants`,
-              );
-              return variants.map((v) => ({ ...item, variant: v }));
-            } catch {
-              return [];
-            }
-          }),
-        );
-        const allVariants = allVariantsNested.flat();
-
-        const rows: ScaffoldVariantRow[] = allVariants.map((item) => ({
-          customerId: item.customer.id,
-          customerName: item.customer.name || `고객 #${item.customer.id}`,
-          branchId: item.branch.id,
-          branchName: item.branch.name ?? `지사 #${item.branch.id}`,
-          projectId: item.project.id,
-          projectStartIso: item.project.start_date,
-          projectEndIso: item.project.end_date,
-          productId: item.product.id,
-          productName: item.product.name,
-          variantId: item.variant.id,
-          variantName: item.variant.name,
-          variantCode: item.variant.code ?? null,
-        }));
-
+        const rows = await loadDataViewScaffoldRows();
         if (mounted) setScaffoldVariants(rows);
       } catch (e) {
         console.error('DataView scaffold load failed', e);
@@ -801,6 +819,7 @@ export default function DataView() {
   const [requestTierFilter, setRequestTierFilter] = useState<'all' | 'tier2' | 'tier3'>('all');
   const [requestMessage, setRequestMessage] = useState('');
   const [requestDueDate, setRequestDueDate] = useState('');
+  const [remindingNodeIds, setRemindingNodeIds] = useState<Set<number>>(new Set());
 
   // Generate period options
   const generatePeriodOptions = () => {
@@ -1242,8 +1261,63 @@ export default function DataView() {
     return <span className="px-3 py-1 bg-green-100 text-green-700 rounded-full text-xs font-medium flex items-center gap-1"><CheckCircle className="w-3 h-3" />PCF 계산 완료</span>;
   };
 
+  const handleSendReminder = async (
+    card: DetailProductCard,
+    month: string,
+    node: DataNode,
+  ) => {
+    const targetNodeId = node.supplyChainNodeId;
+    if (!Number.isFinite(targetNodeId)) {
+      toast.error('요청 대상 노드를 찾지 못했습니다.');
+      return;
+    }
+    if (remindingNodeIds.has(targetNodeId!)) return;
+
+    const [reportingYear, reportingMonth] = month.split('-').map(Number);
+    const monthKey = `${card.id}-${month}`;
+    const root = overviewByKey[monthKey];
+    const requesterNodeId = root?.supplyChainNodeId ?? null;
+
+    setRemindingNodeIds((prev) => {
+      const next = new Set(prev);
+      next.add(targetNodeId!);
+      return next;
+    });
+
+    try {
+      const payload: OprDataRequestCreateBody = {
+        project_id: card.projectId,
+        product_id: card.productId,
+        product_variant_id: card.productVariantId,
+        reporting_year: reportingYear,
+        reporting_month: reportingMonth,
+        requester_supply_chain_node_id: requesterNodeId,
+        request_mode: 'direct',
+        message: '데이터를 입력하세요',
+        target_supply_chain_node_ids: [targetNodeId!],
+      };
+      await postOprDataRequest(payload);
+      toast.success(`${node.companyName}에 리마인드 알림을 보냈습니다.`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(`리마인드 전송 실패: ${msg}`);
+    } finally {
+      setRemindingNodeIds((prev) => {
+        const next = new Set(prev);
+        next.delete(targetNodeId!);
+        return next;
+      });
+    }
+  };
+
   // Unified render - simplified structure with 9 columns only (no horizontal scroll)
-  const renderNode = (node: DataNode, depth: number = 0, parentNode?: DataNode | null) => {
+  const renderNode = (
+    node: DataNode,
+    card: DetailProductCard,
+    month: string,
+    depth: number = 0,
+    parentNode?: DataNode | null,
+  ) => {
     const isExpanded = expandedNodes.has(node.id);
     const hasChildren = node.children && node.children.length > 0;
     const isTier0 = node.tier === 'Tier 0';
@@ -1326,7 +1400,24 @@ export default function DataView() {
 
             {/* Unified Status - 중앙 정렬 */}
             <div className="min-w-0 flex justify-center">
-              {getUnifiedStatusBadge(node)}
+              <div className="flex items-center gap-2">
+                {getUnifiedStatusBadge(node)}
+                {node.dataSubmissionStatus === 'not-submitted' &&
+                  node.tier !== 'Tier 0' &&
+                  typeof node.supplyChainNodeId === 'number' && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void handleSendReminder(card, month, node);
+                      }}
+                      disabled={remindingNodeIds.has(node.supplyChainNodeId)}
+                      className="px-2.5 py-1 text-xs border border-[#5B3BFA] text-[#5B3BFA] rounded-md hover:bg-violet-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {remindingNodeIds.has(node.supplyChainNodeId) ? '전송 중…' : '리마인드'}
+                    </button>
+                  )}
+              </div>
             </div>
 
             <div className="min-w-0" aria-hidden />
@@ -1405,7 +1496,7 @@ export default function DataView() {
         {/* Children */}
         {isExpanded && hasChildren && (
           <div className="transition-all duration-200">
-            {node.children!.map((child) => renderNode(child, depth + 1, node))}
+            {node.children!.map((child) => renderNode(child, card, month, depth + 1, node))}
           </div>
         )}
       </div>
@@ -1643,7 +1734,7 @@ export default function DataView() {
                             데이터를 불러오지 못했습니다. 다시 펼쳐 보세요.
                           </div>
                         ) : overviewByKey[monthKey] ? (
-                          renderNode(overviewByKey[monthKey])
+                          renderNode(overviewByKey[monthKey], card, month)
                         ) : (
                           <div className="p-8 text-center text-gray-500">불러오는 중…</div>
                         )}

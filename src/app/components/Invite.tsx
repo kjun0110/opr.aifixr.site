@@ -33,7 +33,7 @@ import {
   OPR_PENDING_INVITE_SEND_STORAGE_KEY,
   startOprGoogleLinkFlow,
 } from '@/lib/api/oprGoogleLink';
-import { actorStorageKey, apiFetch } from '@/lib/api/client';
+import { apiFetch } from '@/lib/api/client';
 import {
   displayVersionCode,
   fetchContractRevisionPdfBlob,
@@ -441,18 +441,7 @@ https://aifix.com/signup
 
     reloadTier1Ref.current = loadTier1Suppliers;
 
-    /** 초대 API는 X-Actor-User-Id 필수 — 세션 복원 전에 호출하면 401. 히스토리·1차목록과 동일 타이밍에 호출 */
     const loadAttachmentRevision = async () => {
-      if (typeof window !== 'undefined') {
-        const actor = localStorage.getItem(actorStorageKey());
-        if (!actor?.trim()) {
-          if (mounted) {
-            setAttachmentRevision(null);
-            setAttachmentRevisionLoading(false);
-          }
-          return;
-        }
-      }
       if (!mounted) return;
       setAttachmentRevisionLoading(true);
       try {
@@ -502,8 +491,6 @@ https://aifix.com/signup
         sessionStorage.removeItem(OPR_PENDING_INVITE_SEND_STORAGE_KEY);
         return;
       }
-      if (!localStorage.getItem(actorStorageKey())?.trim()) return;
-
       inviteResumeInFlightRef.current = true;
       setSendInvitesLoading(true);
       try {

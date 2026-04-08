@@ -19,6 +19,7 @@ export const OPR_DEPARTMENT_STORAGE_KEY = "aifixr-opr-department";
 /** 로그인 직후 세션을 다시 읽도록 알림 */
 export const AIFIXR_SESSION_UPDATED_EVENT = "aifixr-session-updated";
 
+/** @deprecated JWT 식별로 전환됨. 신규 코드에서 사용하지 마세요. */
 export function actorStorageKey(): string {
   return (
     process.env.NEXT_PUBLIC_ACTOR_STORAGE_KEY?.trim() ||
@@ -74,8 +75,7 @@ async function postOprRefresh(): Promise<boolean> {
         return false;
       }
       setOprAccessToken(data.accessToken);
-      if (typeof window !== "undefined" && data.user?.id) {
-        localStorage.setItem(actorStorageKey(), data.user.id);
+      if (typeof window !== "undefined") {
         const dept = data.user.department?.trim();
         if (dept) {
           localStorage.setItem(OPR_DEPARTMENT_STORAGE_KEY, dept);
@@ -106,10 +106,6 @@ export async function apiFetch<T = unknown>(
     if (token && !headers.has("Authorization")) {
       headers.set("Authorization", `Bearer ${token}`);
     }
-    const actor = localStorage.getItem(actorStorageKey());
-    if (actor && !headers.has("X-Actor-User-Id")) {
-      headers.set("X-Actor-User-Id", actor);
-    }
   }
 
   if (json !== undefined) {
@@ -139,10 +135,6 @@ export async function apiFetch<T = unknown>(
       const t2 = getOprAccessToken();
       if (t2 && !h2.has("Authorization")) {
         h2.set("Authorization", `Bearer ${t2}`);
-      }
-      const actor2 = localStorage.getItem(actorStorageKey());
-      if (actor2 && !h2.has("X-Actor-User-Id")) {
-        h2.set("X-Actor-User-Id", actor2);
       }
       if (json !== undefined) {
         h2.set("Content-Type", "application/json");
@@ -209,10 +201,6 @@ export async function apiFetchBlob(
     if (token && !headers.has("Authorization")) {
       headers.set("Authorization", `Bearer ${token}`);
     }
-    const actor = localStorage.getItem(actorStorageKey());
-    if (actor && !headers.has("X-Actor-User-Id")) {
-      headers.set("X-Actor-User-Id", actor);
-    }
   }
 
   if (json !== undefined) {
@@ -242,10 +230,6 @@ export async function apiFetchBlob(
       const t2 = getOprAccessToken();
       if (t2 && !h2.has("Authorization")) {
         h2.set("Authorization", `Bearer ${t2}`);
-      }
-      const actor2 = localStorage.getItem(actorStorageKey());
-      if (actor2 && !h2.has("X-Actor-User-Id")) {
-        h2.set("X-Actor-User-Id", actor2);
       }
       if (json !== undefined) {
         h2.set("Content-Type", "application/json");

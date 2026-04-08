@@ -1,6 +1,5 @@
 import {
   AIFIXR_SESSION_UPDATED_EVENT,
-  actorStorageKey,
   apiUrl,
   OPR_DEPARTMENT_STORAGE_KEY,
   postOprLogout,
@@ -52,7 +51,6 @@ export async function loginOprAndStoreSession(
   const data = (await res.json()) as OprLoginResponse;
   if (typeof window !== "undefined") {
     setOprAccessToken(data.accessToken);
-    localStorage.setItem(actorStorageKey(), data.user.id);
     const dept = data.user.department?.trim();
     if (dept) {
       localStorage.setItem(OPR_DEPARTMENT_STORAGE_KEY, dept);
@@ -73,7 +71,6 @@ export async function clearOprSession(): Promise<void> {
   if (typeof window === "undefined") return;
   setOprAccessToken(null);
   await postOprLogout();
-  localStorage.removeItem(actorStorageKey());
   localStorage.removeItem(OPR_DEPARTMENT_STORAGE_KEY);
   // 구버전 토큰 키 정리
   try {

@@ -66,6 +66,16 @@ type ApiProject = { id: number; cust_branch_id: number; name: string; code: stri
 type ApiProduct = { id: number; project_id: number; name: string; code: string };
 type ApiProductVariant = { id: number; product_id: number; name: string; code?: string | null };
 type ApiBom = { id: number; product_variant_id: number; code?: string | null };
+type ApiSupplyChainNode = {
+  id: number;
+  product_variant_id: number;
+  supplier_id: number;
+  supplier_name: string;
+  supplier_code?: string | null;
+  parent_node_id: number | null;
+  tier: number | null;
+  status: string;
+};
 /** 제품별 SRM 1차 협력사 후보 (모달) */
 type ApiSupplierBrief = { id: number; product_id: number; name: string; code?: string | null };
 
@@ -304,17 +314,6 @@ const mockSupplyChain: SupplyChainNode = {
   ],
 };
 
-const LS_REGISTERED_TIER1_SUPPLIERS_KEY = 'aifix_mock_registered_tier1_suppliers_v1';
-type RegisteredTier1Supplier = {
-  id: string;
-  name: string;
-  nameEn: string;
-  supplierId: number;
-  projectId: number;
-  productId: number;
-  productVariantId: number;
-};
-
 export default function ProjectSupplyChain() {
   const { mode } = useMode();
   const isProcurementView = mode === 'procurement'; // 1차 협력사 추가는 구매 관점에서만 가능
@@ -328,6 +327,7 @@ export default function ProjectSupplyChain() {
   const [scopeProductsRaw, setScopeProductsRaw] = useState<ScopeProductRow[]>([]);
   const [isApiLoaded, setIsApiLoaded] = useState(false);
   const [apiLoadError, setApiLoadError] = useState<string | null>(null);
+  const [diagramNodes, setDiagramNodes] = useState<ApiSupplyChainNode[]>([]);
 
   // Filter states (고객·지사·제품 순서 무관 — 값이 있으면 해당 차원으로 후보만 좁힘)
   const [selectedCustomer, setSelectedCustomer] = useState('');
@@ -654,14 +654,11 @@ export default function ProjectSupplyChain() {
       }
     };
     
-    // 세션 복원 대기 후 로드
-    const timer = setTimeout(() => {
-      void load();
-    }, 500);
-    
+    // 초기 로드는 즉시 수행 (불필요한 지연 제거)
+    void load();
+
     // 세션 업데이트 이벤트 리스너
     const handleSessionUpdate = () => {
-      clearTimeout(timer);
       void load();
     };
     
@@ -671,7 +668,6 @@ export default function ProjectSupplyChain() {
     
     return () => {
       mounted = false;
-      clearTimeout(timer);
       if (typeof window !== 'undefined') {
         window.removeEventListener('aifixr-session-updated', handleSessionUpdate);
       }
@@ -695,34 +691,40 @@ export default function ProjectSupplyChain() {
             const branchesRes = await apiFetch<ApiBranch[]>(
               `${SUPPLY_CHAIN_BASE}/project-supply-chain/customers/${c.id}/branches`
             );
-            for (const b of branchesRes) {
+            branchesRes.forEach((b) => {
               br.push({
                 branchId: b.id,
                 branchName: b.name,
                 customerId: c.id,
                 customerName: c.name,
               });
-              try {
-                const p = await apiFetch<ApiProject>(
-                  `${SUPPLY_CHAIN_BASE}/project-supply-chain/branches/${b.id}/project`
-                );
-                const products = await apiFetch<ApiProduct[]>(
-                  `${SUPPLY_CHAIN_BASE}/project-supply-chain/projects/${p.id}/products`
-                );
-                for (const prod of products) {
-                  pr.push({
-                    code: prod.code,
-                    name: prod.name,
-                    branchId: b.id,
-                    branchName: b.name,
-                    customerId: c.id,
-                    customerName: c.name,
+            });
+
+            // 지사별 프로젝트/제품 조회를 병렬 처리해 드롭다운 준비 속도 개선
+            await Promise.all(
+              branchesRes.map(async (b) => {
+                try {
+                  const p = await apiFetch<ApiProject>(
+                    `${SUPPLY_CHAIN_BASE}/project-supply-chain/branches/${b.id}/project`
+                  );
+                  const products = await apiFetch<ApiProduct[]>(
+                    `${SUPPLY_CHAIN_BASE}/project-supply-chain/projects/${p.id}/products`
+                  );
+                  products.forEach((prod) => {
+                    pr.push({
+                      code: prod.code,
+                      name: prod.name,
+                      branchId: b.id,
+                      branchName: b.name,
+                      customerId: c.id,
+                      customerName: c.name,
+                    });
                   });
+                } catch {
+                  /* 프로젝트 없음 */
                 }
-              } catch {
-                /* 프로젝트 없음 */
-              }
-            }
+              })
+            );
           } catch {
             /* 고객별 스킵 */
           }
@@ -899,6 +901,70 @@ export default function ProjectSupplyChain() {
   const currentDetailProduct = selectedProductItemCode === 'ALL'
     ? undefined
     : detailProducts.find(dp => dp.productItemCode === selectedProductItemCode || dp.id === selectedProductItemCode);
+  const variantIdsForDiagram = useMemo(() => {
+    if (selectedProductItemCode === 'ALL') {
+      return detailProducts
+        .map((dp) => Number(dp.id))
+        .filter((n) => Number.isFinite(n));
+    }
+    const n = Number(currentDetailProduct?.id);
+    return Number.isFinite(n) ? [n] : [];
+  }, [selectedProductItemCode, detailProducts, currentDetailProduct]);
+  const variantIdsKeyForDiagram = useMemo(
+    () => variantIdsForDiagram.join(','),
+    [variantIdsForDiagram],
+  );
+  const currentProjectIdForDiagram = useMemo(() => {
+    const project = scopedProjects.find((p) =>
+      p.productGroups.some((pg) => pg.productCode === currentProductGroup?.productCode),
+    );
+    const n = Number(project?.id);
+    return Number.isFinite(n) ? n : null;
+  }, [scopedProjects, currentProductGroup?.productCode]);
+
+  useEffect(() => {
+    if (!hasQueried || currentProjectIdForDiagram == null || variantIdsForDiagram.length === 0) {
+      setDiagramNodes((prev) => (prev.length === 0 ? prev : []));
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const rowsByVariant = await Promise.all(
+          variantIdsForDiagram.map((variantId) =>
+            apiFetch<ApiSupplyChainNode[]>(
+              `${SUPPLY_CHAIN_BASE}/project-supply-chain/projects/${currentProjectIdForDiagram}/product-variants/${variantId}/nodes`,
+            ).catch(() => []),
+          ),
+        );
+        const merged = new Map<number, ApiSupplyChainNode>();
+        rowsByVariant.flat().forEach((row) => {
+          merged.set(row.id, row);
+        });
+        if (!cancelled) {
+          const next = Array.from(merged.values());
+          setDiagramNodes((prev) => {
+            const prevKey = prev
+              .map((r) => `${r.id}:${r.parent_node_id ?? 'root'}:${r.status}`)
+              .sort()
+              .join('|');
+            const nextKey = next
+              .map((r) => `${r.id}:${r.parent_node_id ?? 'root'}:${r.status}`)
+              .sort()
+              .join('|');
+            return prevKey === nextKey ? prev : next;
+          });
+        }
+      } catch {
+        if (!cancelled) {
+          setDiagramNodes((prev) => (prev.length === 0 ? prev : []));
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [hasQueried, currentProjectIdForDiagram, variantIdsKeyForDiagram, variantIdsForDiagram]);
 
   const handleQuery = () => {
     if (!selectedProductFilterCode || selectedProductFilterCode === '') {
@@ -1135,7 +1201,6 @@ export default function ProjectSupplyChain() {
     }
 
     clearAddSupplierModalValidation();
-    const selected = modalSuppliers.find((s) => String(s.id) === modalSupplier);
     try {
       await apiFetch(
         `${SUPPLY_CHAIN_BASE}/project-supply-chain/projects/${nProj}/product-variants/${nVariant}/tier1-suppliers`,
@@ -1145,32 +1210,6 @@ export default function ProjectSupplyChain() {
       const msg = e instanceof Error ? e.message : '추가 요청에 실패했습니다.';
       toast.error(msg);
       return;
-    }
-
-    try {
-      if (selected) {
-        const prevRaw = localStorage.getItem(LS_REGISTERED_TIER1_SUPPLIERS_KEY);
-        const prev = (prevRaw ? JSON.parse(prevRaw) : []) as RegisteredTier1Supplier[];
-        const item: RegisteredTier1Supplier = {
-          id: `${nProj}:${rPg}:${nVariant}:${selected.id}`,
-          name: selected.name,
-          nameEn: selected.code ?? '',
-          supplierId: selected.id,
-          projectId: nProj,
-          productId: Number(rPg),
-          productVariantId: nVariant,
-        };
-        const exists = prev.some(
-          (p) =>
-            p.supplierId === item.supplierId &&
-            p.projectId === item.projectId &&
-            p.productVariantId === item.productVariantId,
-        );
-        const next = exists ? prev : [...prev, item];
-        localStorage.setItem(LS_REGISTERED_TIER1_SUPPLIERS_KEY, JSON.stringify(next));
-      }
-    } catch {
-      /* localStorage 실패 무시 */
     }
 
     toast.success('1차 협력사가 추가되었습니다');
@@ -1465,6 +1504,8 @@ export default function ProjectSupplyChain() {
                 <SupplyChainDiagram
                   selectedDetailProduct={selectedProductItemCode === 'ALL' ? 'ALL' : (currentDetailProduct?.id ?? 'ALL')}
                   detailProducts={detailProducts}
+                  apiNodes={diagramNodes}
+                  useApiData={hasQueried}
                 />
               </div>
             </div>

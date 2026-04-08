@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import ReactFlow, {
   Node,
   Edge,
@@ -37,6 +37,14 @@ interface CompanyNodeData {
 interface SupplyChainDiagramProps {
   selectedDetailProduct: string;
   detailProducts: Array<{ id: string; displayName: string; bomCode: string; suppliers: string[] }>;
+  useApiData?: boolean;
+  apiNodes?: Array<{
+    id: number;
+    parent_node_id: number | null;
+    supplier_name: string;
+    tier: number | null;
+    status: string;
+  }>;
 }
 
 const getTierColor = (tier: string) => {
@@ -151,9 +159,9 @@ function CompactCompanyNode({ data }: { data: CompanyNodeData }) {
   );
 }
 
-const nodeTypes = {
+const NODE_TYPES = {
   company: CompactCompanyNode,
-};
+} as const;
 
 // Supply chain tree structure definition
 interface SupplyChainTreeNode {
@@ -415,8 +423,12 @@ function calculateTreeLayout(
     currentOffset += childResult.width + horizontalSpacing;
   });
 
-  const firstChildX = childResults[0].nodes[0].x;
-  const lastChildX = childResults[childResults.length - 1].nodes[0].x;
+  if (childResults.length === 0) {
+    result.push({ node, x: offset, y });
+    return { nodes: result, width: nodeWidth };
+  }
+  const firstChildX = childResults[0].nodes[0]?.x ?? offset;
+  const lastChildX = childResults[childResults.length - 1].nodes[0]?.x ?? offset;
   const parentX = (firstChildX + lastChildX) / 2;
 
   result.push({ node, x: parentX, y });
@@ -492,21 +504,65 @@ function calculatePCFTotal(suppliers: string[]): number {
 export default function SupplyChainDiagram({
   selectedDetailProduct,
   detailProducts,
+  useApiData = false,
+  apiNodes = [],
 }: SupplyChainDiagramProps) {
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const [hoveredNodeData, setHoveredNodeData] = useState<CompanyNodeData | null>(null);
   const [zoomLevel, setZoomLevel] = useState(1);
 
+  const activeTree = useMemo<SupplyChainTreeNode>(() => {
+    if (!useApiData && !apiNodes.length) return supplyChainTree;
+    const map = new Map<number, SupplyChainTreeNode>();
+    const parentIds = new Map<number, number | null>();
+    for (const n of apiNodes) {
+      const tierNo = n.tier ?? (n.parent_node_id == null ? 1 : 2);
+      const tierLabel = (`Tier ${Math.max(1, Math.min(3, tierNo))}` as SupplyChainTreeNode['tier']);
+      map.set(n.id, {
+        id: `node-${n.id}`,
+        tier: tierLabel,
+        companyName: n.supplier_name,
+        companyNameEn: n.supplier_name,
+        country: '-',
+        materialType: '-',
+        pcfContribution: 0,
+        signupStatus: n.status === 'approved' ? 'joined' : 'invited_only',
+        children: [],
+      });
+      parentIds.set(n.id, n.parent_node_id);
+    }
+    const roots: SupplyChainTreeNode[] = [];
+    for (const [id, node] of map.entries()) {
+      const parentId = parentIds.get(id);
+      if (parentId != null && map.has(parentId)) {
+        map.get(parentId)!.children!.push(node);
+      } else {
+        roots.push(node);
+      }
+    }
+    return {
+      id: 'tier0-root',
+      tier: 'Tier 0',
+      companyName: '원청사',
+      companyNameEn: 'Operator',
+      country: '-',
+      materialType: '-',
+      pcfContribution: 100,
+      signupStatus: 'joined',
+      children: roots,
+    };
+  }, [apiNodes, useApiData]);
+
   // Calculate tree layout
   const layoutResult = useMemo(() => {
-    return calculateTreeLayout(supplyChainTree);
-  }, []);
+    return calculateTreeLayout(activeTree);
+  }, [activeTree]);
 
   // Get hovered path
   const hoveredPath = useMemo(() => {
     if (!hoveredNodeId) return new Set<string>();
-    return getNodePath(hoveredNodeId, supplyChainTree);
-  }, [hoveredNodeId]);
+    return getNodePath(hoveredNodeId, activeTree);
+  }, [hoveredNodeId, activeTree]);
 
   // Determine which BOM to use for highlighting
   const effectiveSelectedProduct = selectedDetailProduct;
@@ -514,6 +570,7 @@ export default function SupplyChainDiagram({
   // Create nodes
   const initialNodes: Node<CompanyNodeData>[] = useMemo(() => {
     const isNodeHighlighted = (nodeId: string) => {
+      if (useApiData) return true;
       if (effectiveSelectedProduct === 'ALL') return true;
       const currentDetailProduct = detailProducts.find(dp => dp.id === effectiveSelectedProduct);
       return currentDetailProduct?.suppliers.includes(nodeId) || false;
@@ -527,10 +584,15 @@ export default function SupplyChainDiagram({
       return inclusion;
     };
 
-    return layoutResult.nodes.map(({ node, x, y }) => ({
+    return layoutResult.nodes
+      .filter(({ x, y }) => Number.isFinite(x) && Number.isFinite(y))
+      .map(({ node, x, y }) => ({
       id: node.id,
       type: 'company',
-      position: { x, y },
+      position: {
+        x: Number.isFinite(x) ? x : 0,
+        y: Number.isFinite(y) ? y : 0,
+      },
       data: {
         id: node.id,
         tier: node.tier,
@@ -555,6 +617,7 @@ export default function SupplyChainDiagram({
   // Create edges
   const initialEdges: Edge[] = useMemo(() => {
     const isEdgeHighlighted = (sourceId: string, targetId: string) => {
+      if (useApiData) return true;
       if (effectiveSelectedProduct === 'ALL') return true;
       const currentDetailProduct = detailProducts.find(dp => dp.id === effectiveSelectedProduct);
       return (
@@ -567,7 +630,7 @@ export default function SupplyChainDiagram({
       return hoveredPath.has(sourceId) && hoveredPath.has(targetId);
     };
 
-    const edges = buildEdges(supplyChainTree);
+    const edges = buildEdges(activeTree);
 
     return edges.map(edge => {
       const highlighted = isEdgeHighlighted(edge.source, edge.target);
@@ -588,32 +651,35 @@ export default function SupplyChainDiagram({
         },
       };
     });
-  }, [effectiveSelectedProduct, detailProducts, hoveredPath]);
+  }, [effectiveSelectedProduct, detailProducts, hoveredPath, activeTree, useApiData]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
 
-  // Update nodes when dependencies change (only data, not positions)
-  useMemo(() => {
-    setNodes((currentNodes) =>
-      currentNodes.map((currentNode) => {
-        const newNode = initialNodes.find((n) => n.id === currentNode.id);
-        if (newNode) {
-          return {
-            ...currentNode,
-            data: newNode.data,
-            draggable: newNode.draggable,
-          };
-        }
-        return currentNode;
-      })
-    );
+  // initialNodes/initialEdges 변경 시 상태 동기화
+  useEffect(() => {
+    setNodes(initialNodes);
   }, [initialNodes, setNodes]);
-
-  // Update edges when dependencies change
-  useMemo(() => {
+  useEffect(() => {
     setEdges(initialEdges);
   }, [initialEdges, setEdges]);
+
+  const canRenderMiniMap = useMemo(() => {
+    const positioned = nodes.filter(
+      (n) => Number.isFinite(n.position?.x) && Number.isFinite(n.position?.y),
+    );
+    if (positioned.length === 0) return false;
+
+    const xs = positioned.map((n) => n.position.x);
+    const ys = positioned.map((n) => n.position.y);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+
+    // MiniMap은 폭/높이가 0인 경우(view bounds degenerate) 내부 viewBox 계산에서 NaN이 발생할 수 있다.
+    return Number.isFinite(minX) && Number.isFinite(maxX) && Number.isFinite(minY) && Number.isFinite(maxY) && maxX > minX && maxY > minY;
+  }, [nodes]);
 
   const onNodeMouseEnter: NodeMouseHandler = useCallback((event, node) => {
     setHoveredNodeId(node.id);
@@ -683,7 +749,7 @@ export default function SupplyChainDiagram({
           onNodeClick={onNodeClick}
           onNodeMouseEnter={onNodeMouseEnter}
           onNodeMouseLeave={onNodeMouseLeave}
-          nodeTypes={nodeTypes}
+          nodeTypes={NODE_TYPES}
           connectionLineType={ConnectionLineType.SmoothStep}
           nodesDraggable={true}
           nodesConnectable={false}
@@ -698,15 +764,17 @@ export default function SupplyChainDiagram({
         >
           <Background color="#E5E7EB" gap={16} />
           <Controls className="bg-white rounded-lg shadow-lg" />
-          <MiniMap
-            className="bg-white rounded-lg shadow-lg"
-            style={{ width: '180px', height: '120px' }}
-            nodeColor={(node) => {
-              const data = node.data as CompanyNodeData;
-              return getTierColor(data.tier);
-            }}
-            maskColor="rgba(91, 59, 250, 0.1)"
-          />
+          {canRenderMiniMap && (
+            <MiniMap
+              className="bg-white rounded-lg shadow-lg"
+              style={{ width: '180px', height: '120px' }}
+              nodeColor={(node) => {
+                const data = node.data as CompanyNodeData;
+                return getTierColor(data.tier);
+              }}
+              maskColor="rgba(0, 0, 0, 0.06)"
+            />
+          )}
         </ReactFlow>
 
         {/* Hover Tooltip */}
