@@ -4,10 +4,12 @@ import { useEffect, useMemo, useState } from 'react';
 import { ChevronDown, ChevronRight, Filter, Folder } from 'lucide-react';
 import { toast } from 'sonner';
 import MonthPicker from '@/app/components/MonthPicker';
+import { Badge } from '@/app/components/ui/badge';
 import { useMode } from '@/app/context/ModeContext';
 import { apiFetch, restoreOprSessionFromCookie } from '@/lib/api/client';
+import { API_PREFIX } from '@/lib/api/paths';
 import { getOprAccessToken } from '@/lib/api/sessionAccessToken';
-import { getOprBomPeriod } from '@/lib/api/dataMgmtOpr';
+import { getOprBomPeriod, getOprTier0RowContext } from '@/lib/api/dataMgmtOpr';
 
 type ScaffoldVariantRow = {
   customerId: number;
@@ -24,8 +26,36 @@ type ScaffoldVariantRow = {
   variantCode: string | null;
 };
 
+type AnomalyEvaluateResponse = {
+  anomaly_id: number;
+  workplace_name_norm: string;
+  rule_evaluations: Array<{
+    id: number;
+    rule_code: string;
+    rule_group: string;
+    is_hit: boolean;
+    score_contribution?: number | null;
+    observed_value?: number | null;
+    threshold_value?: number | null;
+    evidence_json?: Record<string, unknown> | null;
+  }>;
+  rule_score: number;
+  final_score: number;
+  final_status: string;
+  anomaly_reason: string | null;
+  scoring_version: string;
+};
+
+type AnomalyNarrativeResponse = {
+  anomaly_id: number;
+  narrative: string;
+  embedding_present: boolean;
+  model_used: string;
+};
+
 type OutlierVariantCard = {
   key: string;
+  workplaceName: string;
   customerName: string;
   branchName: string;
   productName: string;
@@ -72,6 +102,18 @@ function monthLabelKo(ym: string): string {
   return `${y}년 ${mo}월`;
 }
 
+function getDefaultQueryMonth(): string {
+  const now = new Date();
+  const y = now.getFullYear();
+  const prevMonth = now.getMonth();
+  if (prevMonth === 0) return `${y - 1}-12`;
+  return `${y}-${String(prevMonth).padStart(2, '0')}`;
+}
+
+function rowKeyOf(r: Pick<ScaffoldVariantRow, 'branchId' | 'variantId'>): string {
+  return `b${r.branchId}-v${r.variantId}`;
+}
+
 /** 데모: 월 + 세부제품 키 기준 결정론적 지표 (추후 API로 대체) */
 function demoMetricsForVariantMonth(ym: string, variantKey: string) {
   const s = `${ym}|${variantKey}`;
@@ -87,14 +129,15 @@ function demoMetricsForVariantMonth(ym: string, variantKey: string) {
     return (h >>> 0) / 2 ** 32;
   };
   return {
-    electricityKwh: Math.round(85_000 + u() * 95_000),
+    /** 월별 전력 사용량 (MWh) */
+    electricityMwh: Math.round((85 + u() * 95) * 100) / 100,
     wasteTon: Math.round((3.5 + u() * 42) * 100) / 100,
     production: Math.round(6_200 + u() * 18_000),
     temperatureC: Math.round((17 + u() * 15) * 10) / 10,
-    /** 계약전력 (kW) */
-    contractPowerKw: Math.round(1_200 + u() * 4_800),
-    /** 설비용량 (kVA) */
-    facilityCapacityKva: Math.round((800 + u() * 3_200) * 10) / 10,
+    /** 계약전력 (MWh) */
+    contractPowerMwh: Math.round(1_200 + u() * 4_800),
+    /** 설비용량 (MWh) */
+    facilityCapacityMwh: Math.round((800 + u() * 3_200) * 10) / 10,
   };
 }
 
@@ -117,15 +160,19 @@ export default function IfOutlierPage() {
 
   const [selectedCustomer, setSelectedCustomer] = useState('');
   const [selectedBranch, setSelectedBranch] = useState('');
+  const [selectedWorkplace, setSelectedWorkplace] = useState('');
   const [selectedProduct, setSelectedProduct] = useState('');
   const [selectedDetailProduct, setSelectedDetailProduct] = useState('');
-  const [queryMonth, setQueryMonth] = useState<string | null>(null);
+  const [queryMonth, setQueryMonth] = useState<string | null>(() => getDefaultQueryMonth());
 
   const [hasQueried, setHasQueried] = useState(false);
   const [resultCards, setResultCards] = useState<OutlierVariantCard[]>([]);
   const [expandedCards, setExpandedCards] = useState<Set<string>>(() => new Set());
   const [expandedMonthByCard, setExpandedMonthByCard] = useState<Set<string>>(() => new Set());
   const [bomByKey, setBomByKey] = useState<Record<string, string | null>>({});
+  const [workplacesByRowKey, setWorkplacesByRowKey] = useState<Record<string, string[]>>({});
+  const [detectingByKey, setDetectingByKey] = useState<Record<string, boolean>>({});
+  const [analysisByKey, setAnalysisByKey] = useState<Record<string, string>>({});
 
   useEffect(() => {
     let mounted = true;
@@ -260,12 +307,11 @@ export default function IfOutlierPage() {
   }, [scaffoldVariants, selectedCustomer]);
 
   const productOptions = useMemo(() => {
-    if (!selectedCustomer) return [];
-    const cid = Number(selectedCustomer);
-    if (!Number.isFinite(cid)) return [];
+    const cid = selectedCustomer ? Number(selectedCustomer) : NaN;
+    const hasCustomer = selectedCustomer && Number.isFinite(cid);
     const byId = new Map<number, string>();
     for (const r of scaffoldVariants) {
-      if (r.customerId !== cid) continue;
+      if (hasCustomer && r.customerId !== cid) continue;
       if (selectedBranch) {
         const bid = Number(selectedBranch);
         if (!Number.isFinite(bid) || r.branchId !== bid) continue;
@@ -278,15 +324,17 @@ export default function IfOutlierPage() {
   }, [scaffoldVariants, selectedCustomer, selectedBranch]);
 
   const detailProductOptions = useMemo(() => {
-    if (!selectedCustomer || !selectedProduct) return [];
-    const cid = Number(selectedCustomer);
+    if (!selectedProduct) return [];
+    const cid = selectedCustomer ? Number(selectedCustomer) : NaN;
+    const hasCustomer = selectedCustomer && Number.isFinite(cid);
     const pid = Number(selectedProduct);
-    if (!Number.isFinite(cid) || !Number.isFinite(pid)) return [];
+    if (!Number.isFinite(pid)) return [];
     const bid = selectedBranch ? Number(selectedBranch) : NaN;
     const hasBranch = selectedBranch && Number.isFinite(bid);
     return scaffoldVariants
       .filter((r) => {
-        if (r.customerId !== cid || r.productId !== pid) return false;
+        if (hasCustomer && r.customerId !== cid) return false;
+        if (r.productId !== pid) return false;
         if (hasBranch) return r.branchId === bid;
         return true;
       })
@@ -295,8 +343,8 @@ export default function IfOutlierPage() {
 
   /** 조회 월 선택 가능 범위: 선택된 행들의 프로젝트 기간 합집합 */
   const enabledMonthsForPicker = useMemo(() => {
-    const cid = Number(selectedCustomer);
-    if (!Number.isFinite(cid)) return undefined;
+    const cid = selectedCustomer ? Number(selectedCustomer) : NaN;
+    const hasCustomer = selectedCustomer && Number.isFinite(cid);
     const bid = selectedBranch ? Number(selectedBranch) : NaN;
     const hasBranch = selectedBranch && Number.isFinite(bid);
     const pid = selectedProduct ? Number(selectedProduct) : NaN;
@@ -306,10 +354,14 @@ export default function IfOutlierPage() {
 
     const acc = new Set<string>();
     for (const r of scaffoldVariants) {
-      if (r.customerId !== cid) continue;
+      if (hasCustomer && r.customerId !== cid) continue;
       if (hasBranch && r.branchId !== bid) continue;
       if (hasProduct && r.productId !== pid) continue;
       if (hasVariant && r.variantId !== vid) continue;
+      if (selectedWorkplace) {
+        const ws = workplacesByRowKey[rowKeyOf(r)] ?? [];
+        if (!ws.includes(selectedWorkplace)) continue;
+      }
       monthsFromProjectIso(r.projectStartIso, r.projectEndIso).forEach((m) => acc.add(m));
     }
     const list = Array.from(acc).sort();
@@ -318,13 +370,15 @@ export default function IfOutlierPage() {
     scaffoldVariants,
     selectedCustomer,
     selectedBranch,
+    selectedWorkplace,
     selectedProduct,
     selectedDetailProduct,
+    workplacesByRowKey,
   ]);
 
   const filteredRowsForQuery = useMemo(() => {
-    const cid = Number(selectedCustomer);
-    if (!Number.isFinite(cid)) return [];
+    const cid = selectedCustomer ? Number(selectedCustomer) : NaN;
+    const hasCustomer = selectedCustomer && Number.isFinite(cid);
     const bid = selectedBranch ? Number(selectedBranch) : NaN;
     const hasBranch = selectedBranch && Number.isFinite(bid);
     const pid = selectedProduct ? Number(selectedProduct) : NaN;
@@ -335,7 +389,7 @@ export default function IfOutlierPage() {
     const seen = new Set<string>();
     const out: ScaffoldVariantRow[] = [];
     for (const r of scaffoldVariants) {
-      if (r.customerId !== cid) continue;
+      if (hasCustomer && r.customerId !== cid) continue;
       if (hasBranch && r.branchId !== bid) continue;
       if (hasProduct && r.productId !== pid) continue;
       if (hasVariant && r.variantId !== vid) continue;
@@ -357,11 +411,54 @@ export default function IfOutlierPage() {
     selectedDetailProduct,
   ]);
 
-  const handleQuery = () => {
-    if (!selectedCustomer) {
-      toast.error('고객사를 선택해 주세요.');
-      return;
+  useEffect(() => {
+    let mounted = true;
+    const missingRows = filteredRowsForQuery.filter((r) => workplacesByRowKey[rowKeyOf(r)] == null);
+    if (missingRows.length === 0) return;
+
+    void (async () => {
+      const next: Record<string, string[]> = {};
+      await Promise.all(
+        missingRows.map(async (r) => {
+          const key = rowKeyOf(r);
+          try {
+            if (typeof window !== 'undefined' && !getOprAccessToken()) {
+              await restoreOprSessionFromCookie();
+            }
+            const ctx = await getOprTier0RowContext(r.branchId, r.variantId);
+            const names = Array.from(
+              new Set(
+                (ctx.workplaces ?? [])
+                  .map((w) => (w.workplace_name ?? '').trim())
+                  .filter((n) => n.length > 0),
+              ),
+            ).sort((a, b) => a.localeCompare(b));
+            next[key] = names;
+          } catch {
+            next[key] = [];
+          }
+        }),
+      );
+      if (!mounted) return;
+      setWorkplacesByRowKey((prev) => ({ ...prev, ...next }));
+    })();
+
+    return () => {
+      mounted = false;
+    };
+  }, [filteredRowsForQuery, workplacesByRowKey]);
+
+  const workplaceOptions = useMemo(() => {
+    const names = new Set<string>();
+    for (const r of filteredRowsForQuery) {
+      const key = rowKeyOf(r);
+      const ws = workplacesByRowKey[key] ?? [];
+      for (const w of ws) names.add(w);
     }
+    return Array.from(names).sort((a, b) => a.localeCompare(b));
+  }, [filteredRowsForQuery, workplacesByRowKey]);
+
+  const handleQuery = () => {
     if (!queryMonth) {
       toast.error('조회 월을 선택해 주세요.');
       return;
@@ -371,14 +468,38 @@ export default function IfOutlierPage() {
       const months = monthsFromProjectIso(r.projectStartIso, r.projectEndIso);
       return months.includes(ym);
     };
-    const rows = filteredRowsForQuery.filter(inRange);
+    const workplaceFilter = selectedWorkplace.trim();
+    const rows = filteredRowsForQuery.filter((r) => {
+      if (!inRange(r)) return false;
+      if (!workplaceFilter) return true;
+      const ws = workplacesByRowKey[rowKeyOf(r)] ?? [];
+      return ws.includes(workplaceFilter);
+    });
     if (rows.length === 0) {
-      toast.error('선택한 월이 프로젝트 기간에 포함되는 세부제품이 없습니다.');
+      if (workplaceFilter) {
+        toast.error('선택한 사업장·조회 월 조건에 맞는 데이터가 없습니다.');
+      } else {
+        toast.error('선택한 조회 월 조건에 맞는 데이터가 없습니다.');
+      }
       return;
     }
 
-    const cards: OutlierVariantCard[] = rows.map((r) => ({
-      key: `b${r.branchId}-v${r.variantId}`,
+    const rowByWorkplace = new Map<string, ScaffoldVariantRow>();
+    for (const r of rows) {
+      const ws = workplacesByRowKey[rowKeyOf(r)] ?? [];
+      if (workplaceFilter) {
+        if (!rowByWorkplace.has(workplaceFilter)) rowByWorkplace.set(workplaceFilter, r);
+        continue;
+      }
+      for (const w of ws) {
+        const label = (w || '').trim();
+        if (!label) continue;
+        if (!rowByWorkplace.has(label)) rowByWorkplace.set(label, r);
+      }
+    }
+    const cards: OutlierVariantCard[] = Array.from(rowByWorkplace.entries()).map(([wname, r]) => ({
+      key: `w${r.branchId}-${r.variantId}-${wname}`,
+      workplaceName: wname,
       customerName: r.customerName,
       branchName: r.branchName,
       productName: r.productName,
@@ -388,12 +509,18 @@ export default function IfOutlierPage() {
       branchId: r.branchId,
       bomCode: r.variantCode,
     }));
+    if (cards.length === 0) {
+      toast.error('조회 조건에 맞는 사업장 데이터가 없습니다.');
+      return;
+    }
     setResultCards(cards);
     setBomByKey({});
     setHasQueried(true);
     setExpandedCards(new Set(cards.map((c) => c.key)));
     setExpandedMonthByCard(new Set());
-    toast.success(`세부제품 ${cards.length}건 · ${monthLabelKo(ym)} (데모 지표)`);
+    toast.success(
+      `사업장 ${cards.length}건 · ${workplaceFilter || '사업장 전체'} · ${monthLabelKo(ym)} (데모 지표)`,
+    );
 
     void (async () => {
       const next: Record<string, string | null> = {};
@@ -417,9 +544,10 @@ export default function IfOutlierPage() {
   const handleReset = () => {
     setSelectedCustomer('');
     setSelectedBranch('');
+    setSelectedWorkplace('');
     setSelectedProduct('');
     setSelectedDetailProduct('');
-    setQueryMonth(null);
+    setQueryMonth(getDefaultQueryMonth());
     setHasQueried(false);
     setResultCards([]);
     setExpandedCards(new Set());
@@ -451,6 +579,62 @@ export default function IfOutlierPage() {
   );
   const ni = useMemo(() => new Intl.NumberFormat('ko-KR'), []);
 
+  const runOutlierDetection = async (
+    card: OutlierVariantCard,
+    ym: string,
+    metrics: ReturnType<typeof demoMetricsForVariantMonth>,
+  ) => {
+    const detectKey = `${card.key}|${ym}`;
+    setDetectingByKey((prev) => ({ ...prev, [detectKey]: true }));
+    try {
+      if (typeof window !== 'undefined' && !getOprAccessToken()) {
+        await restoreOprSessionFromCookie();
+      }
+      const [y, m] = ym.split('-').map(Number);
+      const res = await apiFetch<AnomalyEvaluateResponse>(
+        `${API_PREFIX.ANOMALY}/v1/electricity-monthly/evaluate`,
+        {
+          method: 'POST',
+          json: {
+            workplace_name: card.workplaceName,
+            reporting_year: y,
+            reporting_month: m,
+            electricity_mwh: metrics.electricityMwh,
+            waste_ton: metrics.wasteTon,
+            production_qty: metrics.production,
+            temperature_c: metrics.temperatureC,
+            contract_power_mwh: metrics.contractPowerMwh,
+            facility_capacity_mwh: metrics.facilityCapacityMwh,
+          },
+        },
+      );
+      const head = `이상치 탐지 (${monthLabelKo(ym)}, ${card.workplaceName})`;
+      const ruleSummary = res.anomaly_reason?.trim() ?? '평가 결과가 없습니다.';
+      let displayBody = `${head}\n\n[규칙 요약]\n${ruleSummary}`;
+      try {
+        const nar = await apiFetch<AnomalyNarrativeResponse>(
+          `${API_PREFIX.ANOMALY}/v1/electricity-monthly/${res.anomaly_id}/narrative`,
+          { method: 'POST' },
+        );
+        const embNote = nar.embedding_present ? '(임베딩 반영)' : '(임베딩 없음 — 배치 실행 시 반영)';
+        displayBody = `${head}\n\n[규칙 요약]\n${ruleSummary}\n\n[화면 설명 · ${nar.model_used}] ${embNote}\n${nar.narrative}`;
+      } catch {
+        displayBody = `${head}\n\n[규칙 요약]\n${ruleSummary}\n\n(Gemini 화면 설명 생략: ANOMALY_AI_ENABLED 또는 API 오류)`;
+      }
+      setAnalysisByKey((prev) => ({ ...prev, [detectKey]: displayBody }));
+      if (res.final_status === 'anomaly') {
+        toast.warning(`${card.workplaceName}: 규칙 기준 이상 신호가 감지되었습니다.`);
+      } else {
+        toast.success(`${card.workplaceName}: 규칙 기준 이상 없음`);
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(`이상치 평가 실패: ${msg}`);
+    } finally {
+      setDetectingByKey((prev) => ({ ...prev, [detectKey]: false }));
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div>
@@ -467,96 +651,22 @@ export default function IfOutlierPage() {
       >
         <h2 className="text-xl font-semibold mb-6">조회 조건</h2>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
           <div>
-            <label className="block text-sm font-medium mb-2">
-              고객사 <span style={{ color: '#EF4444' }}>*</span>
-            </label>
+            <label className="block text-sm font-medium mb-2">사업장</label>
             <select
-              value={selectedCustomer}
+              value={selectedWorkplace}
               disabled={scaffoldLoading}
               onChange={(e) => {
-                setSelectedCustomer(e.target.value);
-                setSelectedBranch('');
-                setSelectedProduct('');
-                setSelectedDetailProduct('');
-                setQueryMonth(null);
-                setHasQueried(false);
-              }}
-              className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5B3BFA] disabled:bg-gray-100"
-            >
-              <option value="">
-                {scaffoldLoading ? '목록 불러오는 중…' : '고객사를 선택하세요'}
-              </option>
-              {customerOptions.map((c) => (
-                <option key={c.id} value={String(c.id)}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium mb-2">지사</label>
-            <select
-              value={selectedBranch}
-              disabled={!selectedCustomer || scaffoldLoading}
-              onChange={(e) => {
-                setSelectedBranch(e.target.value);
-                setSelectedProduct('');
-                setSelectedDetailProduct('');
-                setQueryMonth(null);
+                setSelectedWorkplace(e.target.value);
                 setHasQueried(false);
               }}
               className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5B3BFA] disabled:bg-gray-100"
             >
               <option value="">전체</option>
-              {branchOptions.map((b) => (
-                <option key={b.id} value={String(b.id)}>
-                  {b.name}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium mb-2">제품</label>
-            <select
-              value={selectedProduct}
-              disabled={!selectedCustomer || scaffoldLoading}
-              onChange={(e) => {
-                setSelectedProduct(e.target.value);
-                setSelectedDetailProduct('');
-                setQueryMonth(null);
-                setHasQueried(false);
-              }}
-              className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5B3BFA] disabled:bg-gray-100"
-            >
-              <option value="">전체</option>
-              {productOptions.map((p) => (
-                <option key={p.id} value={String(p.id)}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium mb-2">세부제품</label>
-            <select
-              value={selectedDetailProduct}
-              disabled={!selectedProduct || scaffoldLoading}
-              onChange={(e) => {
-                setSelectedDetailProduct(e.target.value);
-                setQueryMonth(null);
-                setHasQueried(false);
-              }}
-              className="w-full px-4 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5B3BFA] disabled:bg-gray-100"
-            >
-              <option value="">전체</option>
-              {detailProductOptions.map((d) => (
-                <option key={d.variantId} value={String(d.variantId)}>
-                  {d.variantCode ? `${d.variantName} | ${d.variantCode}` : d.variantName}
+              {workplaceOptions.map((name) => (
+                <option key={name} value={name}>
+                  {name}
                 </option>
               ))}
             </select>
@@ -574,11 +684,10 @@ export default function IfOutlierPage() {
               }}
               placeholder="조회할 월을 선택하세요"
               enabledMonths={enabledMonthsForPicker}
-              disabled={!selectedCustomer || scaffoldLoading}
+              disabled={scaffoldLoading}
             />
             <p className="mt-2 text-xs text-gray-500">
-              데이터 관리와 동일한 공급망·제품 스코프입니다. 제품 카드를 펼치면 해당 월의 I/F 지표 스키마를
-              확인합니다.
+              사업장과 조회 월 기준으로 이상치 검정 대상을 조회합니다.
             </p>
           </div>
         </div>
@@ -615,7 +724,7 @@ export default function IfOutlierPage() {
         >
           <Filter className="w-16 h-16 mx-auto mb-4 text-gray-300" />
           <p className="text-gray-500 text-lg">
-            고객사·조회 월을 선택한 뒤 조회 버튼을 눌러주세요
+            사업장·조회 월을 선택한 뒤 조회 버튼을 눌러주세요
           </p>
         </div>
       ) : (
@@ -631,6 +740,7 @@ export default function IfOutlierPage() {
           {resultCards.map((card) => {
             const isCardOpen = expandedCards.has(card.key);
             const isMonthOpen = expandedMonthByCard.has(card.key);
+            const workplaceLabel = card.workplaceName;
             const bom =
               bomByKey[card.key] !== undefined
                 ? bomByKey[card.key] || '-'
@@ -639,6 +749,9 @@ export default function IfOutlierPage() {
               queryMonth != null
                 ? demoMetricsForVariantMonth(queryMonth, card.key)
                 : null;
+            const detectKey = queryMonth ? `${card.key}|${queryMonth}` : '';
+            const isDetecting = detectKey ? !!detectingByKey[detectKey] : false;
+            const analysisText = detectKey ? analysisByKey[detectKey] : '';
 
             return (
               <div key={card.key} className="mb-2">
@@ -668,29 +781,9 @@ export default function IfOutlierPage() {
                     </span>
                     <Folder className={`w-5 h-5 shrink-0 ${mode === 'procurement' ? 'text-[#5B3BFA]' : 'text-[#00B4FF]'}`} />
                     <div className="flex-1 min-w-0 text-sm text-gray-700 flex flex-wrap gap-x-4 gap-y-1">
-                      <span>
-                        고객사: <span className="font-medium">{card.customerName}</span>
-                      </span>
-                      <span>
-                        지사: <span className="font-medium">{card.branchName}</span>
-                      </span>
-                      <span>
-                        제품: <span className="font-medium">{card.productName}</span>
-                      </span>
-                      <span>
-                        세부제품:{' '}
-                        <span className="font-medium">
-                          {card.variantCode
-                            ? `${card.variantName} | ${card.variantCode}`
-                            : card.variantName}
-                        </span>
-                      </span>
-                      <span>
-                        BOM 코드:{' '}
-                        <span className={`font-semibold ${mode === 'procurement' ? 'text-[#5B3BFA]' : 'text-[#00B4FF]'}`}>
-                          {bom}
-                        </span>
-                      </span>
+                      <Badge variant="outline" className="text-xs border-gray-300 text-gray-700 bg-white/70">
+                        사업장: {workplaceLabel}
+                      </Badge>
                     </div>
                   </div>
                 </div>
@@ -717,57 +810,80 @@ export default function IfOutlierPage() {
                         )}
                       </span>
                       <span className="font-medium text-gray-800">{monthLabelKo(queryMonth)}</span>
-                      <span className="text-xs text-gray-500 ml-auto">인터페이스 지표 (데모)</span>
+                      <div className="ml-auto flex items-center gap-2">
+                        <button
+                          type="button"
+                          className="px-3 py-1.5 rounded-lg text-xs font-medium text-white disabled:opacity-60"
+                          style={{ background: gradient }}
+                          disabled={!metrics || isDetecting}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (!metrics || !queryMonth) return;
+                            void runOutlierDetection(card, queryMonth, metrics);
+                          }}
+                        >
+                          {isDetecting ? '탐지 중...' : '이상치 탐지'}
+                        </button>
+                        <span className="text-xs text-gray-500">지표(데모) → 서버 규칙 평가</span>
+                      </div>
                     </div>
 
                     {isMonthOpen && metrics && (
-                      <div className="overflow-x-auto p-4">
-                        <table className="w-full min-w-[720px] border-collapse text-sm">
-                          <thead>
-                            <tr className="bg-[#F8F9FA]">
-                              <th className="border border-gray-200 px-4 py-2.5 text-left font-semibold text-[var(--aifix-navy,#0f172a)]">
-                                전력 (kWh)
-                              </th>
-                              <th className="border border-gray-200 px-4 py-2.5 text-left font-semibold text-[var(--aifix-navy,#0f172a)]">
-                                폐기물 (ton)
-                              </th>
-                              <th className="border border-gray-200 px-4 py-2.5 text-left font-semibold text-[var(--aifix-navy,#0f172a)]">
-                                생산량
-                              </th>
-                              <th className="border border-gray-200 px-4 py-2.5 text-left font-semibold text-[var(--aifix-navy,#0f172a)]">
-                                온도 (°C)
-                              </th>
-                              <th className="border border-gray-200 px-4 py-2.5 text-left font-semibold text-[var(--aifix-navy,#0f172a)]">
-                                계약전력 (kW)
-                              </th>
-                              <th className="border border-gray-200 px-4 py-2.5 text-left font-semibold text-[var(--aifix-navy,#0f172a)]">
-                                설비용량 (kVA)
-                              </th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            <tr className="hover:bg-gray-50/80">
-                              <td className="border border-gray-200 px-4 py-3 tabular-nums text-right text-gray-800">
-                                {ni.format(metrics.electricityKwh)}
-                              </td>
-                              <td className="border border-gray-200 px-4 py-3 tabular-nums text-right text-gray-800">
-                                {nf.format(metrics.wasteTon)}
-                              </td>
-                              <td className="border border-gray-200 px-4 py-3 tabular-nums text-right text-gray-800">
-                                {ni.format(metrics.production)}
-                              </td>
-                              <td className="border border-gray-200 px-4 py-3 tabular-nums text-right text-gray-800">
-                                {nf.format(metrics.temperatureC)}
-                              </td>
-                              <td className="border border-gray-200 px-4 py-3 tabular-nums text-right text-gray-800">
-                                {ni.format(metrics.contractPowerKw)}
-                              </td>
-                              <td className="border border-gray-200 px-4 py-3 tabular-nums text-right text-gray-800">
-                                {nf.format(metrics.facilityCapacityKva)}
-                              </td>
-                            </tr>
-                          </tbody>
-                        </table>
+                      <div className="p-4 space-y-3">
+                        <div className="overflow-x-auto">
+                          <table className="w-full min-w-[720px] border-collapse text-sm">
+                            <thead>
+                              <tr className="bg-[#F8F9FA]">
+                                <th className="border border-gray-200 px-4 py-2.5 text-left font-semibold text-[var(--aifix-navy,#0f172a)]">
+                                  전력 (MWh)
+                                </th>
+                                <th className="border border-gray-200 px-4 py-2.5 text-left font-semibold text-[var(--aifix-navy,#0f172a)]">
+                                  폐기물 (ton)
+                                </th>
+                                <th className="border border-gray-200 px-4 py-2.5 text-left font-semibold text-[var(--aifix-navy,#0f172a)]">
+                                  생산량
+                                </th>
+                                <th className="border border-gray-200 px-4 py-2.5 text-left font-semibold text-[var(--aifix-navy,#0f172a)]">
+                                  온도 (°C)
+                                </th>
+                                <th className="border border-gray-200 px-4 py-2.5 text-left font-semibold text-[var(--aifix-navy,#0f172a)]">
+                                  계약전력 (MWh)
+                                </th>
+                                <th className="border border-gray-200 px-4 py-2.5 text-left font-semibold text-[var(--aifix-navy,#0f172a)]">
+                                  설비용량 (MWh)
+                                </th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              <tr className="hover:bg-gray-50/80">
+                                <td className="border border-gray-200 px-4 py-3 tabular-nums text-right text-gray-800">
+                                  {nf.format(metrics.electricityMwh)}
+                                </td>
+                                <td className="border border-gray-200 px-4 py-3 tabular-nums text-right text-gray-800">
+                                  {nf.format(metrics.wasteTon)}
+                                </td>
+                                <td className="border border-gray-200 px-4 py-3 tabular-nums text-right text-gray-800">
+                                  {ni.format(metrics.production)}
+                                </td>
+                                <td className="border border-gray-200 px-4 py-3 tabular-nums text-right text-gray-800">
+                                  {nf.format(metrics.temperatureC)}
+                                </td>
+                                <td className="border border-gray-200 px-4 py-3 tabular-nums text-right text-gray-800">
+                                  {ni.format(metrics.contractPowerMwh)}
+                                </td>
+                                <td className="border border-gray-200 px-4 py-3 tabular-nums text-right text-gray-800">
+                                  {nf.format(metrics.facilityCapacityMwh)}
+                                </td>
+                              </tr>
+                            </tbody>
+                          </table>
+                        </div>
+                        {analysisText && (
+                          <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                            <span className="font-semibold">원인 분석</span>
+                            <p className="mt-1 leading-6">{analysisText}</p>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -777,8 +893,9 @@ export default function IfOutlierPage() {
           })}
 
           <p className="text-xs text-gray-500 px-1">
-            데모 지표입니다. BOM 코드는 data-mgmt API로 조회하며, 전력·폐기물·생산량·온도·계약전력·설비용량은
-            추후 MES/ERP I/F API와 연결할 수 있습니다.
+            표에 보이는 수치는 데모 난수입니다. 전력은 MWh 단위로 전송됩니다. 이상치 탐지 클릭 시 동일 값이 KJ{' '}
+            <code className="text-gray-600">/api/anomaly/v1/electricity-monthly/evaluate</code>로 전송되어{' '}
+            DB에 적재되고 온톨로지 규칙(PHY_001~004)으로 평가됩니다. BOM 코드는 data-mgmt API로 조회합니다.
           </p>
         </div>
       )}

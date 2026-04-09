@@ -9,6 +9,7 @@ export const API_PREFIX = {
   DATA_CONTRACT: "/api/data-contract",
   NOTIFICATION: "/api/notification",
   PCF: "/api/pcf",
+  ANOMALY: "/api/anomaly",
 } as const;
 
 /** 루트 헬스 (KJ main) */
