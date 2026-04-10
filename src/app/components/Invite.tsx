@@ -725,7 +725,7 @@ https://aifix.com/signup
           contact_name: r.contactName.trim(),
           email: r.email.trim(),
         },
-        expire_days: 3,
+        expire_days: 7,
         email_subject: subject.trim(),
         email_body: bodyForBackend,
       });
