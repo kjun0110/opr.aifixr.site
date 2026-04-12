@@ -45,6 +45,10 @@ export type PcfRunExecuteResponse = {
   product_result_id: number | null;
   scopes: PcfScopeItem[];
   message?: string | null;
+  /** 원청 자사 구간 총배출(부분산정과 동일 기준, kg) */
+  opr_own_total_co2e_kg?: number | null;
+  /** 최종 산정 시 1차 협력사 총배출 합(kg); 부분이면 0 */
+  opr_tier1_upstream_total_co2e_kg?: number | null;
 };
 
 export type PcfRunListItem = {

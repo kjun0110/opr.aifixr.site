@@ -18,6 +18,7 @@ import Invite from './Invite';
 import { useMode } from '../context/ModeContext';
 import { apiFetch } from '@/lib/api/client';
 import { SUPPLY_CHAIN_BASE } from '@/lib/api/supply-chain';
+import { dedupeSupplyChainNodesForDiagram } from '@/lib/supplyChainDiagramNodes';
 
 // Supply chain node structure
 interface SupplyChainNode {
@@ -487,6 +488,9 @@ export default function ProjectSupplyChain() {
     });
   }, [projectRows, selectedCustomer, selectedBranchKey]);
 
+  /** API 로드 직후 조건이 맞으면 1회 자동 조회(사용자가 조회하기를 누르지 않아도 공급망 표시) */
+  const supplyChainAutoQueryDoneRef = useRef(false);
+
   /** Google Gmail 연동 완료 후 복귀 시 1차 초대 모달 자동 오픈 (?tier1Invite=1) */
   const tier1InviteReopenHandled = useRef(false);
   useEffect(() => {
@@ -922,6 +926,25 @@ export default function ProjectSupplyChain() {
     return Number.isFinite(n) ? n : null;
   }, [scopedProjects, currentProductGroup?.productCode]);
 
+  const firstScopedProductCode = productGroups[0]?.productCode;
+
+  useEffect(() => {
+    if (supplyChainAutoQueryDoneRef.current) return;
+    if (!isApiLoaded || apiLoadError) return;
+    if (!selectedProductFilterCode || selectedProductFilterCode === '') return;
+    if (!firstScopedProductCode) return;
+    supplyChainAutoQueryDoneRef.current = true;
+    setHasQueried(true);
+    setSelectedProductCode(firstScopedProductCode);
+    setSelectedProductItemCode('ALL');
+  }, [
+    isApiLoaded,
+    apiLoadError,
+    selectedProductFilterCode,
+    productGroups.length,
+    firstScopedProductCode,
+  ]);
+
   useEffect(() => {
     if (!hasQueried || currentProjectIdForDiagram == null || variantIdsForDiagram.length === 0) {
       setDiagramNodes((prev) => (prev.length === 0 ? prev : []));
@@ -930,19 +953,17 @@ export default function ProjectSupplyChain() {
     let cancelled = false;
     void (async () => {
       try {
-        const rowsByVariant = await Promise.all(
-          variantIdsForDiagram.map((variantId) =>
-            apiFetch<ApiSupplyChainNode[]>(
-              `${SUPPLY_CHAIN_BASE}/project-supply-chain/projects/${currentProjectIdForDiagram}/product-variants/${variantId}/nodes`,
-            ).catch(() => []),
-          ),
+        const qs = new URLSearchParams();
+        variantIdsForDiagram.forEach((id) =>
+          qs.append('product_variant_ids', String(id)),
         );
-        const merged = new Map<number, ApiSupplyChainNode>();
-        rowsByVariant.flat().forEach((row) => {
-          merged.set(row.id, row);
-        });
+        const raw = await apiFetch<unknown>(
+          `${SUPPLY_CHAIN_BASE}/project-supply-chain/projects/${currentProjectIdForDiagram}/supply-chain-nodes?${qs.toString()}`,
+        ).catch(() => []);
+        const next = dedupeSupplyChainNodesForDiagram(
+          Array.isArray(raw) ? raw : [],
+        ) as ApiSupplyChainNode[];
         if (!cancelled) {
-          const next = Array.from(merged.values());
           setDiagramNodes((prev) => {
             const prevKey = prev
               .map((r) => `${r.id}:${r.parent_node_id ?? 'root'}:${r.status}`)
@@ -1335,7 +1356,7 @@ export default function ProjectSupplyChain() {
 
             {/* Branch */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">세부 지사</label>
+              <label className="block text-sm font-medium text-gray-700 mb-2">지사</label>
               <select
                 value={selectedBranchKey}
                 onChange={(e) => setSelectedBranchKey(e.target.value)}
@@ -1522,7 +1543,7 @@ export default function ProjectSupplyChain() {
                   ? `공급망 API 조회 실패: ${apiLoadError}`
                   : customers.length === 0
                     ? 'DB에서 조회된 공급망 데이터가 없습니다.'
-                    : '조회 조건을 선택하고 조회하기 버튼을 클릭하세요'}
+                    : '고객사·지사·제품을 고른 뒤 우측 하단 「조회하기」를 누르면 공급망이 표시됩니다. 제품은 ALL 또는 특정 제품을 선택하세요.'}
             </p>
           </div>
         )}
@@ -1577,7 +1598,7 @@ export default function ProjectSupplyChain() {
 
       {showAddSupplierModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-2xl p-8 max-w-2xl w-full mx-4" style={{ boxShadow: '0px 8px 32px rgba(0, 0, 0, 0.12)' }}>
+          <div className="bg-white rounded-2xl p-8 max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto" style={{ boxShadow: '0px 8px 32px rgba(0, 0, 0, 0.12)' }}>
             <h2 className="text-2xl font-bold text-gray-900 mb-2">1차 협력사 추가</h2>
             {addSupplierModalErrorBanner ? (
               <div
@@ -1631,7 +1652,7 @@ export default function ProjectSupplyChain() {
                     <label
                       className={`block text-xs mb-1 ${addSupplierModalErrors.branch ? 'text-red-600 font-semibold' : 'text-gray-600'}`}
                     >
-                      세부 지사
+                      지사
                     </label>
                     <select
                       value={modalBranch}
@@ -1757,11 +1778,12 @@ export default function ProjectSupplyChain() {
                   />
                 </div>
                 <div
-                  className={`mt-2 max-h-40 overflow-y-auto rounded-lg ${
+                  className={`mt-2 h-48 overflow-y-auto rounded-lg ${
                     addSupplierModalErrors.supplier
                       ? 'border-2 border-red-500 ring-2 ring-red-200'
                       : 'border border-gray-200'
                   }`}
+                  style={{ minHeight: '12rem', maxHeight: '12rem' }}
                 >
                   {modalSuppliersLoading && (
                     <div className="px-4 py-3 text-sm text-gray-500">협력사 목록 불러오는 중…</div>

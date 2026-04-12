@@ -385,6 +385,41 @@ function monthlyRowsToTree(rows: OprMonthlyTierRow[], cardId: string, month: str
   return root;
 }
 
+/** 조회 결과 트리 → 협력사 상세의 직상위차사 표시용 (티어·노드 식별자 포함, Tier0 역할명은 카드 고객사명으로 보정) */
+function buildParentCompanySessionPayload(
+  parentNode: DataNode | null | undefined,
+  card: DetailProductCard,
+): string {
+  if (!parentNode) {
+    return JSON.stringify({
+      v: 1,
+      tier: '',
+      companyName: '-',
+      companyNameEn: '',
+      supplyChainNodeId: null,
+      nodeId: '',
+    });
+  }
+  const rawName = parentNode.companyName?.trim() ?? '';
+  const isTier0Placeholder =
+    parentNode.tier === 'Tier 0' &&
+    (rawName === '원청사' ||
+      rawName === '우리회사' ||
+      rawName === '-' ||
+      rawName === '');
+  const resolvedName =
+    isTier0Placeholder && card.customer?.trim() ? card.customer.trim() : rawName || '-';
+
+  return JSON.stringify({
+    v: 1,
+    tier: parentNode.tier,
+    companyName: resolvedName,
+    companyNameEn: parentNode.companyNameEn?.trim() ?? '',
+    supplyChainNodeId: parentNode.supplyChainNodeId ?? null,
+    nodeId: parentNode.id,
+  });
+}
+
 // Supply Chain Group & Version for matching
 interface SupplyChainGroup {
   id: string;
@@ -816,7 +851,7 @@ export default function DataView() {
   } | null>(null);
   const [selectedRequestNodeIds, setSelectedRequestNodeIds] = useState<Set<string>>(new Set());
   const [expandedRequestNodeIds, setExpandedRequestNodeIds] = useState<Set<string>>(new Set());
-  const [requestTierFilter, setRequestTierFilter] = useState<'all' | 'tier2' | 'tier3'>('all');
+  const [requestTierFilter, setRequestTierFilter] = useState<'all' | 'tier1' | 'tier2' | 'tier3'>('all');
   const [requestMessage, setRequestMessage] = useState('');
   const [requestDueDate, setRequestDueDate] = useState('');
   const [remindingNodeIds, setRemindingNodeIds] = useState<Set<number>>(new Set());
@@ -1456,11 +1491,10 @@ export default function DataView() {
                     // ignore
                   }
                   try {
-                    const parentName =
-                      parentNode?.companyName && parentNode.companyName.trim()
-                        ? parentNode.companyName
-                        : '-';
-                    sessionStorage.setItem('aifix_data_view_selected_parent_company_v1', parentName);
+                    sessionStorage.setItem(
+                      'aifix_data_view_selected_parent_company_v1',
+                      buildParentCompanySessionPayload(parentNode, card),
+                    );
                   } catch {
                     // ignore
                   }
@@ -1516,9 +1550,15 @@ export default function DataView() {
     return out;
   };
 
-  const parseTierNumber = (tierLabel: string): number => {
-    const m = /tier\s*(\d+)/i.exec(tierLabel);
-    return m ? Number(m[1]) : 0;
+  const collectNodesWithDepth = (root: DataNode | undefined): { node: DataNode; depth: number }[] => {
+    if (!root) return [];
+    const out: { node: DataNode; depth: number }[] = [];
+    const walk = (n: DataNode, depth: number) => {
+      out.push({ node: n, depth });
+      for (const c of n.children ?? []) walk(c, depth + 1);
+    };
+    walk(root, 0);
+    return out;
   };
 
   // Format month for display (e.g. "2026-01" -> "2026년 1월")
@@ -1635,47 +1675,44 @@ export default function DataView() {
                         <span className="font-medium text-gray-700">{formatMonthLabel(month)}</span>
                       </div>
                       <div className="ml-auto flex items-center gap-2">
-                        {mode === 'pcf' && (
-                          <button
-                            type="button"
+                        <button
+                          type="button"
                           onClick={async (e) => {
-                              e.stopPropagation();
-                              const targetKey = `${card.id}-${month}`;
+                            e.stopPropagation();
+                            const targetKey = `${card.id}-${month}`;
                             const tree =
                               overviewByKey[targetKey] ?? (await ensureMonthOverviewLoaded(card, month));
-                            const nodes = collectTreeNodesWithRoot(tree);
-                            if (nodes.length === 0) {
+                            const withDepth = collectNodesWithDepth(tree);
+                            if (withDepth.length <= 1) {
                               toast.info('선택 가능한 하위 협력사 노드가 없습니다.');
                             }
-                              setRequestModalMonthKey(targetKey);
-                              setRequestModalContext({
-                                projectId: card.projectId,
-                                productId: card.productId,
-                                productVariantId: card.productVariantId,
-                                reportingYear: Number(month.split('-')[0]),
-                                reportingMonth: Number(month.split('-')[1]),
-                                requesterSupplyChainNodeId: tree?.supplyChainNodeId ?? null,
-                              });
-                              setSelectedRequestNodeIds(
-                                new Set(
-                                  nodes
-                                    .filter((n) => n.id !== tree?.id)
-                                    .filter((n) => parseTierNumber(n.tier) >= 2)
-                                    .map((n) => n.id),
-                                ),
-                              );
-                              setExpandedRequestNodeIds(new Set(tree ? [tree.id] : []));
-                              setRequestTierFilter('all');
-                              setRequestMessage('');
-                              setRequestDueDate('');
-                              setShowLowerTierRequestModal(true);
-                            }}
-                            className="px-3 py-1.5 text-xs border border-[#5B3BFA] text-[#5B3BFA] rounded-lg hover:bg-violet-50 transition-all flex items-center justify-center gap-1 flex-shrink-0"
-                          >
-                            <Send className="w-3 h-3" />
-                            하위 협력사 데이터 요청
-                          </button>
-                        )}
+                            setRequestModalMonthKey(targetKey);
+                            setRequestModalContext({
+                              projectId: card.projectId,
+                              productId: card.productId,
+                              productVariantId: card.productVariantId,
+                              reportingYear: Number(month.split('-')[0]),
+                              reportingMonth: Number(month.split('-')[1]),
+                              requesterSupplyChainNodeId: tree?.supplyChainNodeId ?? null,
+                            });
+                            setSelectedRequestNodeIds(
+                              new Set(
+                                withDepth
+                                  .filter(({ depth }) => depth >= 1)
+                                  .map(({ node }) => node.id),
+                              ),
+                            );
+                            setExpandedRequestNodeIds(new Set(tree ? [tree.id] : []));
+                            setRequestTierFilter('all');
+                            setRequestMessage('');
+                            setRequestDueDate('');
+                            setShowLowerTierRequestModal(true);
+                          }}
+                          className="px-3 py-1.5 text-xs border border-[#5B3BFA] text-[#5B3BFA] rounded-lg hover:bg-violet-50 transition-all flex items-center justify-center gap-1 flex-shrink-0"
+                        >
+                          <Send className="w-3 h-3" />
+                          하위 협력사 데이터 요청
+                        </button>
                         <button
                           type="button"
                           onClick={(e) => {
@@ -2137,22 +2174,16 @@ export default function DataView() {
                 <div className="mb-2 flex items-center justify-between">
                   <h4 className="text-sm font-semibold text-gray-800">요청 대상 선택</h4>
                 </div>
-                <div className="mb-3 flex items-center gap-2">
+                <div className="mb-3 flex flex-wrap items-center gap-2">
                   <button
                     type="button"
                     onClick={() => {
                       const root = requestModalMonthKey ? overviewByKey[requestModalMonthKey] : undefined;
-                      const nodes = collectTreeNodesWithRoot(root);
+                      const flat = collectNodesWithDepth(root);
+                      const ids = flat.filter(({ depth }) => depth >= 1).map(({ node }) => node.id);
                       setRequestTierFilter('all');
-                      setSelectedRequestNodeIds(
-                        new Set(
-                          nodes
-                            .filter((n) => n.id !== root?.id)
-                            .filter((n) => parseTierNumber(n.tier) >= 2)
-                            .map((n) => n.id),
-                        ),
-                      );
-                      setExpandedRequestNodeIds(new Set(nodes.map((n) => n.id)));
+                      setSelectedRequestNodeIds(new Set(ids));
+                      setExpandedRequestNodeIds(new Set(flat.map(({ node }) => node.id)));
                     }}
                     className={`rounded-lg border px-3 py-1 text-xs transition-colors ${
                       requestTierFilter === 'all'
@@ -2166,14 +2197,29 @@ export default function DataView() {
                     type="button"
                     onClick={() => {
                       const root = requestModalMonthKey ? overviewByKey[requestModalMonthKey] : undefined;
-                      const nodes = collectTreeNodesWithRoot(root);
-                      const next = nodes
-                        .filter((n) => n.id !== root?.id)
-                        .filter((n) => parseTierNumber(n.tier) >= 2)
-                        .map((n) => n.id);
+                      const flat = collectNodesWithDepth(root);
+                      const next = flat.filter(({ depth }) => depth === 1).map(({ node }) => node.id);
+                      setRequestTierFilter('tier1');
+                      setSelectedRequestNodeIds(new Set(next));
+                      setExpandedRequestNodeIds(new Set(flat.map(({ node }) => node.id)));
+                    }}
+                    className={`rounded-lg border px-3 py-1 text-xs transition-colors ${
+                      requestTierFilter === 'tier1'
+                        ? 'border-[#5B3BFA] bg-violet-50 text-[#5B3BFA]'
+                        : 'border-gray-300 text-gray-700 hover:bg-gray-50'
+                    }`}
+                  >
+                    1차만
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const root = requestModalMonthKey ? overviewByKey[requestModalMonthKey] : undefined;
+                      const flat = collectNodesWithDepth(root);
+                      const next = flat.filter(({ depth }) => depth === 2).map(({ node }) => node.id);
                       setRequestTierFilter('tier2');
                       setSelectedRequestNodeIds(new Set(next));
-                      setExpandedRequestNodeIds(new Set(nodes.map((n) => n.id)));
+                      setExpandedRequestNodeIds(new Set(flat.map(({ node }) => node.id)));
                     }}
                     className={`rounded-lg border px-3 py-1 text-xs transition-colors ${
                       requestTierFilter === 'tier2'
@@ -2187,14 +2233,11 @@ export default function DataView() {
                     type="button"
                     onClick={() => {
                       const root = requestModalMonthKey ? overviewByKey[requestModalMonthKey] : undefined;
-                      const nodes = collectTreeNodesWithRoot(root);
-                      const next = nodes
-                        .filter((n) => n.id !== root?.id)
-                        .filter((n) => parseTierNumber(n.tier) >= 3)
-                        .map((n) => n.id);
+                      const flat = collectNodesWithDepth(root);
+                      const next = flat.filter(({ depth }) => depth === 3).map(({ node }) => node.id);
                       setRequestTierFilter('tier3');
                       setSelectedRequestNodeIds(new Set(next));
-                      setExpandedRequestNodeIds(new Set(nodes.map((n) => n.id)));
+                      setExpandedRequestNodeIds(new Set(flat.map(({ node }) => node.id)));
                     }}
                     className={`rounded-lg border px-3 py-1 text-xs transition-colors ${
                       requestTierFilter === 'tier3'
@@ -2225,14 +2268,16 @@ export default function DataView() {
                       const hasChildren = (node.children?.length ?? 0) > 0;
                       const isExpanded = expandedRequestNodeIds.has(node.id);
                       const checked = selectedRequestNodeIds.has(node.id);
-                      const tierNo = parseTierNumber(node.tier);
                       const selectableByFilter =
                         requestTierFilter === 'all'
-                          ? tierNo >= 2
-                          : requestTierFilter === 'tier2'
-                            ? tierNo >= 2
-                            : tierNo >= 3;
+                          ? depth >= 1
+                          : requestTierFilter === 'tier1'
+                            ? depth === 1
+                            : requestTierFilter === 'tier2'
+                              ? depth === 2
+                              : depth === 3;
                       const isSelectable = !isRoot && selectableByFilter;
+                      const tierBadgeText = depth === 0 ? '원청' : `${depth}차`;
 
                       return (
                         <div key={node.id}>
@@ -2271,7 +2316,7 @@ export default function DataView() {
                               />
                             )}
 
-                            <span className="rounded bg-blue-50 px-2 py-0.5 text-xs text-blue-700">{node.tier}</span>
+                            <span className="rounded bg-blue-50 px-2 py-0.5 text-xs text-blue-700">{tierBadgeText}</span>
                             <span className={`text-sm ${isSelectable || isRoot ? 'text-gray-800' : 'text-gray-400'}`}>{node.companyName}</span>
                           </div>
 

@@ -16,6 +16,7 @@ import ReactFlow, {
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import { AlertCircle, CheckCircle2, RotateCcw, Sparkles } from 'lucide-react';
+import { dedupeSupplyChainNodesForDiagram } from '@/lib/supplyChainDiagramNodes';
 
 // Node data structure
 interface CompanyNodeData {
@@ -513,9 +514,10 @@ export default function SupplyChainDiagram({
 
   const activeTree = useMemo<SupplyChainTreeNode>(() => {
     if (!useApiData && !apiNodes.length) return supplyChainTree;
+    const rows = dedupeSupplyChainNodesForDiagram(apiNodes as unknown[]);
     const map = new Map<number, SupplyChainTreeNode>();
     const parentIds = new Map<number, number | null>();
-    for (const n of apiNodes) {
+    for (const n of rows) {
       const tierNo = n.tier ?? (n.parent_node_id == null ? 1 : 2);
       const tierLabel = (`Tier ${Math.max(1, Math.min(3, tierNo))}` as SupplyChainTreeNode['tier']);
       map.set(n.id, {
@@ -754,6 +756,7 @@ export default function SupplyChainDiagram({
           nodesDraggable={true}
           nodesConnectable={false}
           elementsSelectable={true}
+          onlyRenderVisibleElements
           fitView
           fitViewOptions={{ padding: 0.2, maxZoom: 1.2 }}
           onMove={(event, viewport) => {

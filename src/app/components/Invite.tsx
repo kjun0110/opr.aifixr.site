@@ -323,89 +323,22 @@ https://aifix.com/signup
   useEffect(() => {
     let mounted = true;
 
-    // DB에서 등록된 1차 협력사 목록 가져오기 (병렬 최적화)
+    // DB에서 등록된 1차 협력사 목록 가져오기 (단일 API 호출로 최적화)
     const loadTier1Suppliers = async () => {
       setLoadingSuppliers(true);
       try {
-        const customers = await apiFetch<any[]>('/api/supply-chain/project-supply-chain/customers');
-        
-        // 모든 고객사의 지사를 병렬로 가져오기
-        const allBranchesPromises = customers.map(async (customer) => {
-          try {
-            const branches = await apiFetch<any[]>(`/api/supply-chain/project-supply-chain/customers/${customer.id}/branches`);
-            return branches.map(b => ({ customer, branch: b }));
-          } catch {
-            return [];
-          }
-        });
-        const allBranchesNested = await Promise.all(allBranchesPromises);
-        const allBranches = allBranchesNested.flat();
-        
-        // 모든 지사의 프로젝트를 병렬로 가져오기
-        const allProjectsPromises = allBranches.map(async ({ customer, branch }) => {
-          try {
-            const project = await apiFetch<any>(`/api/supply-chain/project-supply-chain/branches/${branch.id}/project`);
-            return { customer, branch, project };
-          } catch {
-            return null;
-          }
-        });
-        const allProjectsResults = await Promise.all(allProjectsPromises);
-        const allProjects = allProjectsResults.filter((x): x is NonNullable<typeof x> => x !== null);
-        
-        // 모든 프로젝트의 제품을 병렬로 가져오기
-        const allProductsPromises = allProjects.map(async ({ customer, branch, project }) => {
-          try {
-            const products = await apiFetch<any[]>(`/api/supply-chain/project-supply-chain/projects/${project.id}/products`);
-            return products.map(prod => ({ customer, branch, project, product: prod }));
-          } catch {
-            return [];
-          }
-        });
-        const allProductsNested = await Promise.all(allProductsPromises);
-        const allProductsFlat = allProductsNested.flat();
-        
-        // 모든 제품의 변형을 병렬로 가져오기
-        const allVariantsPromises = allProductsFlat.map(async (item) => {
-          try {
-            const variants = await apiFetch<any[]>(`/api/supply-chain/project-supply-chain/projects/${item.project.id}/products/${item.product.id}/product-variants`);
-            return variants.map(v => ({ ...item, variant: v }));
-          } catch {
-            return [];
-          }
-        });
-        const allVariantsNested = await Promise.all(allVariantsPromises);
-        const allVariants = allVariantsNested.flat();
-        
-        // 모든 변형의 노드를 병렬로 가져오기
-        const allNodesPromises = allVariants.map(async (item) => {
-          try {
-            const nodes = await apiFetch<any[]>(`/api/supply-chain/project-supply-chain/projects/${item.project.id}/product-variants/${item.variant.id}/nodes`);
-            // 원청 직속 1차만: API의 parent_node_id = DB supply_chain_node_id(상위 노드).
-            // 협력사가 등록한 직하위(2차+)는 parent가 1차 노드를 가리키므로 제외.
-            const tier1Nodes = nodes.filter(
-              (n: any) =>
-                (n.parent_node_id === null || n.parent_node_id === undefined) &&
-                (n.tier === 1 || n.tier === null),
-            );
-            return tier1Nodes.map(node => ({ ...item, node }));
-          } catch {
-            return [];
-          }
-        });
-        const allNodesNested = await Promise.all(allNodesPromises);
-        const allNodes = allNodesNested.flat();
+        // 새로운 최적화 API: 모든 1차 협력사를 한 번에 조회
+        const allNodes = await apiFetch<any[]>('/api/supply-chain/project-supply-chain/tier1-suppliers-all');
 
-        // 프로젝트·세부제품·협력사 조합마다 별도 행 (회사명만으로 합치면 project_id/React key가 꼬임)
+        // 프로젝트·세부제품·협력사 조합마다 별도 행
         const seenIds = new Set<string>();
         const allTier1: Tier1Supplier[] = [];
 
-        for (const item of allNodes) {
-          const node = item.node;
+        for (const node of allNodes) {
           const name = node.supplier_name?.trim();
           if (!name || node.supplier_id == null) continue;
 
-          const compositeId = `${item.project.id}:${item.product.id}:${item.variant.id}:${node.supplier_id}`;
+          const compositeId = `${node.project_id}:${node.product_id}:${node.variant_id}:${node.supplier_id}`;
           if (seenIds.has(compositeId)) continue;
           seenIds.add(compositeId);
 
@@ -414,13 +347,10 @@ https://aifix.com/signup
             name,
             nameEn: node.supplier_code || undefined,
             supplierId: node.supplier_id,
-            projectId: item.project.id,
-            productId: item.product.id,
-            productVariantId: item.variant.id,
-            invitationId:
-              node.invitation_id != null && node.invitation_id !== undefined
-                ? Number(node.invitation_id)
-                : null,
+            projectId: node.project_id,
+            productId: node.product_id,
+            productVariantId: node.variant_id,
+            invitationId: null, // 초대 ID는 별도 조회 필요 시 추가
           });
         }
 

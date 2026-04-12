@@ -40,6 +40,12 @@ export type OprMonthlyTierRow = {
   delivery_qty: string | null;
   product_type: string | null;
   pcf_result_kg_co2e: string | null;
+  /** 자사 구간 총배출(kg CO2e) — 월별 overview 백엔드가 PCF 결과에서 채움 */
+  own_total_co2e_kg?: number | null;
+  /** 제품 1kg당 배출(kgCO2e/kg) */
+  own_pcf_per_kg_co2e?: number | null;
+  /** 해당 월 하위→상위 PCF 공유 완료(SHARED) — 백엔드 pcf_upstream_shares */
+  upstream_pcf_shared?: boolean | null;
   status_code: string;
   status_message: string | null;
   detail_key: string | null;

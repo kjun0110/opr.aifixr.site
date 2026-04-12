@@ -8,6 +8,7 @@ import {
   loadSupplierDetailSnapshot,
   type SupplierDetailSnapshot,
 } from '@/lib/dataViewSupplierSnapshot';
+import { useMode } from '../context/ModeContext';
 
 // Mock Supplier company data
 interface SupplierDetailData {
@@ -633,14 +634,22 @@ function resolveSupplierCompany(companyKey: string | undefined): SupplierDetailD
   return null;
 }
 
+type ParentCompanyHeader =
+  | { kind: 'node'; tier: string; companyName: string; companyNameEn?: string }
+  | { kind: 'legacy'; text: string };
+
 export default function SupplierDetail() {
   const { companyId } = useParams();
   const router = useRouter();
+  const { mode } = useMode();
   const [activeTab, setActiveTab] = useState(0);
   const [showRequestModal, setShowRequestModal] = useState(false);
   const [requestArea, setRequestArea] = useState('');
   const [requestMessage, setRequestMessage] = useState('');
-  const [parentCompanyName, setParentCompanyName] = useState<string>('-');
+  const [parentCompanyRow, setParentCompanyRow] = useState<ParentCompanyHeader>({
+    kind: 'legacy',
+    text: '-',
+  });
 
   const companyKey = Array.isArray(companyId) ? companyId[0] : companyId;
   const [company, setCompany] = useState<SupplierDetailData | null>(null);
@@ -654,11 +663,64 @@ export default function SupplierDetail() {
   useEffect(() => {
     try {
       const v = sessionStorage.getItem('aifix_data_view_selected_parent_company_v1');
-      setParentCompanyName(v && v.trim() ? v : '-');
+      if (!v?.trim()) {
+        setParentCompanyRow({ kind: 'legacy', text: '-' });
+        return;
+      }
+      const t = v.trim();
+      if (t.startsWith('{')) {
+        const p = JSON.parse(t) as {
+          tier?: string;
+          companyName?: string;
+          companyNameEn?: string;
+        };
+        const name = typeof p.companyName === 'string' ? p.companyName.trim() : '';
+        if (name) {
+          setParentCompanyRow({
+            kind: 'node',
+            tier: typeof p.tier === 'string' ? p.tier.trim() : '',
+            companyName: name,
+            companyNameEn:
+              typeof p.companyNameEn === 'string' && p.companyNameEn.trim()
+                ? p.companyNameEn.trim()
+                : undefined,
+          });
+          return;
+        }
+      }
+      setParentCompanyRow({ kind: 'legacy', text: t });
     } catch {
-      setParentCompanyName('-');
+      setParentCompanyRow({ kind: 'legacy', text: '-' });
     }
   }, []);
+
+  const parentTierBadgeStyle = useMemo(() => {
+    if (parentCompanyRow.kind !== 'node' || !parentCompanyRow.tier) return null;
+    const tier = parentCompanyRow.tier;
+    const main = mode === 'procurement' ? '#5B3BFA' : '#00B4FF';
+    const rgb = mode === 'procurement' ? '91, 59, 250' : '0, 180, 255';
+    switch (tier) {
+      case 'Tier 0':
+        return { bg: `rgba(${rgb}, 0.12)`, text: main, border: `2px solid ${main}` };
+      case 'Tier 1':
+        return { bg: main, text: '#FFFFFF' };
+      case 'Tier 2':
+        return { bg: `rgba(${rgb}, 0.55)`, text: '#FFFFFF' };
+      case 'Tier 3':
+        return { bg: `rgba(${rgb}, 0.28)`, text: main };
+      default:
+        return { bg: '#E5E7EB', text: '#374151' };
+    }
+  }, [mode, parentCompanyRow]);
+
+  const parentDisplayTitle = useMemo(() => {
+    if (parentCompanyRow.kind === 'node') {
+      return [parentCompanyRow.tier, parentCompanyRow.companyName, parentCompanyRow.companyNameEn]
+        .filter((x): x is string => Boolean(x))
+        .join(' ');
+    }
+    return parentCompanyRow.text;
+  }, [parentCompanyRow]);
 
   useEffect(() => {
     const handler = () => {
@@ -1178,9 +1240,37 @@ export default function SupplierDetail() {
                 <div className="flex items-center gap-2 min-w-0">
                   <Building2 className="w-4 h-4 text-gray-400 flex-shrink-0" />
                   <span className="text-gray-600 whitespace-nowrap">직상위차사:</span>
-                  <span className="font-medium text-gray-900 truncate" title={parentCompanyName}>
-                    {parentCompanyName}
-                  </span>
+                  {parentCompanyRow.kind === 'node' ? (
+                    <span
+                      className="flex items-center gap-2 min-w-0 font-medium text-gray-900"
+                      title={parentDisplayTitle}
+                    >
+                      {parentCompanyRow.tier && parentTierBadgeStyle ? (
+                        <span
+                          className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold flex-shrink-0"
+                          style={{
+                            backgroundColor: parentTierBadgeStyle.bg,
+                            color: parentTierBadgeStyle.text,
+                            ...(parentTierBadgeStyle.border && { border: parentTierBadgeStyle.border }),
+                          }}
+                        >
+                          {parentCompanyRow.tier}
+                        </span>
+                      ) : null}
+                      <span className="flex flex-col min-w-0">
+                        <span className="truncate">{parentCompanyRow.companyName}</span>
+                        {parentCompanyRow.companyNameEn ? (
+                          <span className="text-xs text-gray-500 font-normal truncate">
+                            {parentCompanyRow.companyNameEn}
+                          </span>
+                        ) : null}
+                      </span>
+                    </span>
+                  ) : (
+                    <span className="font-medium text-gray-900 truncate" title={parentDisplayTitle}>
+                      {parentCompanyRow.text}
+                    </span>
+                  )}
                 </div>
                 <div className="flex items-center gap-2 min-w-0">
                   <Package className="w-4 h-4 text-gray-400 flex-shrink-0" />

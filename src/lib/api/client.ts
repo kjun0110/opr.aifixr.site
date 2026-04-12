@@ -165,6 +165,85 @@ export async function apiFetch<T = unknown>(
   return (await res.text()) as T;
 }
 
+/**
+ * JSON GET 등 — 404 응답이면 null (apiFetch는 !res.ok 시 throw).
+ * Authorization·401 재시도 동작은 apiFetch와 동일합니다.
+ */
+export async function apiFetchNullable404<T = unknown>(
+  path: string,
+  options: ApiClientOptions = {},
+): Promise<T | null> {
+  const { json, headers: initHeaders, retryOn401 = true, ...rest } = options;
+  const headers = new Headers(initHeaders);
+
+  if (typeof window !== "undefined") {
+    const token = getOprAccessToken();
+    if (token && !headers.has("Authorization")) {
+      headers.set("Authorization", `Bearer ${token}`);
+    }
+  }
+
+  if (json !== undefined) {
+    headers.set("Content-Type", "application/json");
+  }
+
+  const doFetch = () =>
+    fetch(apiUrl(path), {
+      ...rest,
+      credentials: rest.credentials ?? "include",
+      headers,
+      body: json !== undefined ? JSON.stringify(json) : (rest as RequestInit).body,
+    });
+
+  let res = await doFetch();
+
+  if (
+    res.status === 401 &&
+    retryOn401 &&
+    typeof window !== "undefined" &&
+    !path.startsWith(PATH_AUTH_OPR_REFRESH) &&
+    path !== PATH_AUTH_OPR_LOGOUT
+  ) {
+    const ok = await postOprRefresh();
+    if (ok) {
+      const h2 = new Headers(initHeaders);
+      const t2 = getOprAccessToken();
+      if (t2 && !h2.has("Authorization")) {
+        h2.set("Authorization", `Bearer ${t2}`);
+      }
+      if (json !== undefined) {
+        h2.set("Content-Type", "application/json");
+      }
+      res = await fetch(apiUrl(path), {
+        ...rest,
+        credentials: rest.credentials ?? "include",
+        headers: h2,
+        body: json !== undefined ? JSON.stringify(json) : (rest as RequestInit).body,
+      });
+    }
+  }
+
+  if (res.status === 404) {
+    return null;
+  }
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`API ${res.status}: ${text || res.statusText}`);
+  }
+
+  if (res.status === 204) {
+    return undefined as T | null;
+  }
+
+  const ct = res.headers.get("content-type");
+  if (ct?.includes("application/json")) {
+    return (await res.json()) as T;
+  }
+
+  return (await res.text()) as T;
+}
+
 /** Content-Disposition에서 저장 파일명 추출 (filename*=UTF-8 우선) */
 export function parseContentDispositionFilename(headerValue: string | null): string | null {
   if (!headerValue) return null;
